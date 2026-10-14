@@ -1,0 +1,14 @@
+[package]
+name = "specplot-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "specplot"
+path = "src/main.rs"
+
+[dependencies]
+eframe = "0.36.2"
+egui_plot = "0.37.0"
+specplot = { path = "../lib" }
