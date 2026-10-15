@@ -14,4 +14,6 @@ mod tests {
         assert_eq!(greet("world"), "hello, world");
     }
 }
+pub mod event;
+pub mod plan;
 pub mod sample;

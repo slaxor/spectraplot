@@ -39,15 +39,26 @@ mod tests {
     use super::*;
 
     fn sample(nm: f64, reads: &[u32]) -> Sample {
-        Sample { nm, reads: reads.to_vec() }
+        Sample {
+            nm,
+            reads: reads.to_vec(),
+        }
     }
 
     #[test]
     fn parse() {
         let cases = [
-            ("prefixed", "[scan:out] 700.1,1433,1346,1388", Some(sample(700.1, &[1433, 1346, 1388]))),
+            (
+                "prefixed",
+                "[scan:out] 700.1,1433,1346,1388",
+                Some(sample(700.1, &[1433, 1346, 1388])),
+            ),
             ("bare", "700.0,1441", Some(sample(700.0, &[1441]))),
-            ("padded", "  700.2 , 1407 ,1356 ", Some(sample(700.2, &[1407, 1356]))),
+            (
+                "padded",
+                "  700.2 , 1407 ,1356 ",
+                Some(sample(700.2, &[1407, 1356])),
+            ),
             ("header", "[scan:out] # grating 2, 700.0..750.0 nm", None),
             ("status", "[scan:done] 501 steps", None),
             ("no reads", "700.0", None),
