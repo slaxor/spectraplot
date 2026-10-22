@@ -1,25 +1,50 @@
 use eframe::egui;
 use spectraplot::plan::{GRATINGS, HV_VOLTS, Problem, ScanPlan};
+use spectraplot::presets::Presets;
 
 const MAX_READS: u8 = 20;
 
+/// What the user asked for in the planner panel.
+pub enum PlannerAction {
+    Start,
+    SavePreset,
+    DeletePreset,
+}
+
 /// The scan parameter panel, including the grating-change confirmation.
-#[derive(Default)]
 pub struct Planner {
     pub plan: ScanPlan,
     confirming: bool,
 }
 
 impl Planner {
-    /// Draws the panel; returns true when the user asked to start the scan.
-    pub fn show(&mut self, ui: &mut egui::Ui, can_start: bool, grating_changes: bool) -> bool {
+    /// A planner showing `plan`.
+    pub fn new(plan: ScanPlan) -> Self {
+        Self {
+            plan,
+            confirming: false,
+        }
+    }
+
+    /// Draws the panel; returns what the user asked for, if anything.
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        can_start: bool,
+        grating_changes: bool,
+        presets: &Presets,
+        recent: &[ScanPlan],
+    ) -> Option<PlannerAction> {
+        choose_plan(ui, &mut self.plan, presets, recent);
+        let preset_action = name_row(ui, &mut self.plan.name, presets);
         params(ui, &mut self.plan);
         ui.separator();
         ui.label(format!("{} steps", self.plan.steps()));
         ui.monospace(self.plan.to_command());
         problems(ui, &self.plan.problems());
         ui.separator();
-        self.start_buttons(ui, can_start && self.plan.is_runnable(), grating_changes)
+        let start = self.start_buttons(ui, can_start && self.plan.is_runnable(), grating_changes);
+        start.then_some(PlannerAction::Start).or(preset_action)
     }
 
     fn start_buttons(&mut self, ui: &mut egui::Ui, enabled: bool, grating_changes: bool) -> bool {
@@ -50,6 +75,60 @@ impl Planner {
         });
         start
     }
+}
+
+fn choose_plan(ui: &mut egui::Ui, plan: &mut ScanPlan, presets: &Presets, recent: &[ScanPlan]) {
+    egui::ComboBox::from_id_salt("settings")
+        .selected_text("settings…")
+        .width(ui.available_width())
+        .show_ui(ui, |ui| {
+            plan_section(ui, plan, "presets", &presets.items, |p| p.name.clone());
+            ui.separator();
+            plan_section(ui, plan, "recent", recent, ScanPlan::to_line);
+        });
+}
+
+fn plan_section(
+    ui: &mut egui::Ui,
+    plan: &mut ScanPlan,
+    title: &str,
+    candidates: &[ScanPlan],
+    label: impl Fn(&ScanPlan) -> String,
+) {
+    ui.weak(title);
+    for candidate in candidates {
+        if ui
+            .selectable_label(*plan == *candidate, label(candidate))
+            .clicked()
+        {
+            *plan = candidate.clone();
+        }
+    }
+}
+
+fn name_row(ui: &mut egui::Ui, name: &mut String, presets: &Presets) -> Option<PlannerAction> {
+    ui.horizontal(|ui| {
+        ui.label("name");
+        ui.text_edit_singleline(name);
+    });
+    let named = !name.trim().is_empty();
+    let known = presets.contains(name);
+    let mut action = None;
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(named, egui::Button::new("save preset"))
+            .clicked()
+        {
+            action = Some(PlannerAction::SavePreset);
+        }
+        if ui
+            .add_enabled(known, egui::Button::new("delete preset"))
+            .clicked()
+        {
+            action = Some(PlannerAction::DeletePreset);
+        }
+    });
+    action
 }
 
 fn params(ui: &mut egui::Ui, plan: &mut ScanPlan) {

@@ -116,6 +116,7 @@ impl fmt::Display for Problem {
 /// Parameters of one `range-scan`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScanPlan {
+    pub name: String,
     pub grating: u8,
     pub start_nm: f64,
     pub end_nm: f64,
@@ -127,6 +128,7 @@ pub struct ScanPlan {
 impl Default for ScanPlan {
     fn default() -> Self {
         Self {
+            name: String::new(),
             grating: 2,
             start_nm: 700.0,
             end_nm: 750.0,
@@ -212,6 +214,105 @@ impl ScanPlan {
 fn has_one_decimal(value: f64) -> bool {
     let tenths = value * 10.0;
     (tenths - tenths.round()).abs() < 1e-6
+}
+
+impl ScanPlan {
+    /// Reads back a line written by [`ScanPlan::to_command`].
+    pub fn from_command(line: &str) -> Option<Self> {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let [grating, start, end, step, hv, reads, word] = fields[..] else {
+            return None;
+        };
+        if !word.eq_ignore_ascii_case("range-scan") {
+            return None;
+        }
+        Some(Self {
+            name: String::new(),
+            grating: grating.parse().ok()?,
+            start_nm: start.parse().ok()?,
+            end_nm: end.parse().ok()?,
+            step_nm: step.parse().ok()?,
+            hv: hv.parse().ok()?,
+            reads: reads.parse().ok()?,
+        })
+    }
+
+    /// Reads the plan from a scan header such as
+    /// `grating 2, 700.0..750.0 nm, step 0.1 nm, 750 V, 3 reads per step`.
+    ///
+    /// Point measurements and scans without a set voltage yield `None`.
+    pub fn from_header(header: &str) -> Option<Self> {
+        let mut parts = header.split(", ");
+        let grating = parts.next()?.strip_prefix("grating ")?;
+        let (start, end) = parts.next()?.strip_suffix(" nm")?.split_once("..")?;
+        let step = parts.next()?.strip_prefix("step ")?.strip_suffix(" nm")?;
+        let hv = parts.next()?.strip_suffix(" V")?;
+        let reads = parts.next()?.strip_suffix(" reads per step")?;
+        Some(Self {
+            name: String::new(),
+            grating: grating.parse().ok()?,
+            start_nm: start.parse().ok()?,
+            end_nm: end.parse().ok()?,
+            step_nm: step.parse().ok()?,
+            hv: hv.parse().ok()?,
+            reads: reads.parse().ok()?,
+        })
+    }
+
+    /// The storage line: the command, followed by ` # name` when the plan has one.
+    pub fn to_line(&self) -> String {
+        if self.name.is_empty() {
+            self.to_command()
+        } else {
+            format!("{} # {}", self.to_command(), self.name)
+        }
+    }
+
+    /// Reads back a line written by [`ScanPlan::to_line`].
+    pub fn from_line(line: &str) -> Option<Self> {
+        let (command, name) = line.split_once(" # ").unwrap_or((line, ""));
+        let plan = Self::from_command(command)?;
+        Some(Self {
+            name: name.trim().to_string(),
+            ..plan
+        })
+    }
+
+    /// A file name stem: the sanitised name, or the parameters when unnamed.
+    pub fn file_stem(&self) -> String {
+        let name = self.name.trim();
+        if !name.is_empty() {
+            return sanitise(name);
+        }
+        format!(
+            "{:.1}-{:.1}_{:.1}_{}_{}",
+            self.start_nm, self.end_nm, self.step_nm, self.hv, self.reads
+        )
+    }
+
+    /// The same plan with wavelengths rounded to the 0.1 nm the drive accepts.
+    pub fn rounded(&self) -> Self {
+        Self {
+            start_nm: to_tenth(self.start_nm),
+            end_nm: to_tenth(self.end_nm),
+            step_nm: to_tenth(self.step_nm),
+            ..self.clone()
+        }
+    }
+}
+
+fn sanitise(name: &str) -> String {
+    name.chars()
+        .map(|c| if is_file_safe(c) { c } else { '_' })
+        .collect()
+}
+
+fn is_file_safe(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '.' | '-' | '_')
+}
+
+fn to_tenth(value: f64) -> f64 {
+    (value * 10.0).round() / 10.0
 }
 
 #[cfg(test)]
@@ -326,6 +427,121 @@ mod tests {
         ];
         for (name, plan, want) in cases {
             assert_eq!(plan.to_command(), want, "{name}");
+        }
+    }
+
+    #[test]
+    fn from_command() {
+        let cases = [
+            (
+                "own output",
+                ScanPlan::default().to_command(),
+                Some(ScanPlan::default()),
+            ),
+            (
+                "upper case",
+                "2 700.0 750.0 0.1 750 3 RANGE-SCAN".into(),
+                Some(ScanPlan::default()),
+            ),
+            ("other macro", "2 700.0 3 POINT-MEASURE".into(), None),
+            (
+                "missing field",
+                "2 700.0 750.0 0.1 750 range-scan".into(),
+                None,
+            ),
+            (
+                "bad number",
+                "2 700.0 750.0 0.1 x 3 range-scan".into(),
+                None,
+            ),
+            ("empty", String::new(), None),
+        ];
+        for (name, line, want) in cases {
+            assert_eq!(ScanPlan::from_command(&line), want, "{name}");
+        }
+    }
+
+    #[test]
+    fn from_header() {
+        let cases = [
+            (
+                "range scan",
+                "grating 2, 700.0..750.0 nm, step 0.1 nm, 750 V, 3 reads per step",
+                Some(ScanPlan::default()),
+            ),
+            (
+                "point measure",
+                "grating 1, at 300.5 nm, 750 V, 5 reads per step",
+                None,
+            ),
+            (
+                "voltage unchanged",
+                "grating 2, 700.0..750.0 nm, step 0.1 nm, PMT voltage unchanged, 3 reads per step",
+                None,
+            ),
+            ("junk", "hello", None),
+        ];
+        for (name, header, want) in cases {
+            assert_eq!(ScanPlan::from_header(header), want, "{name}");
+        }
+    }
+
+    #[test]
+    fn rounded() {
+        let drifted = plan(|p| {
+            p.start_nm = 700.1 + 0.2;
+            p.step_nm = 0.30000000000000004;
+        });
+        let want = plan(|p| {
+            p.start_nm = 700.3;
+            p.step_nm = 0.3;
+        });
+        assert_eq!(drifted.rounded(), want);
+    }
+
+    #[test]
+    fn line_roundtrip() {
+        let named = plan(|p| p.name = "Ne green line fine resolution".into());
+        let cases = [
+            (
+                "unnamed",
+                plan(|_| {}),
+                "2 700.0 750.0 0.1 750 3 range-scan",
+            ),
+            (
+                "named",
+                named,
+                "2 700.0 750.0 0.1 750 3 range-scan # Ne green line fine resolution",
+            ),
+        ];
+        for (name, plan, want) in cases {
+            assert_eq!(plan.to_line(), want, "{name}");
+            assert_eq!(ScanPlan::from_line(want), Some(plan), "{name} roundtrip");
+        }
+    }
+
+    #[test]
+    fn file_stem() {
+        let cases = [
+            ("unnamed", plan(|_| {}), "700.0-750.0_0.1_750_3"),
+            (
+                "named",
+                plan(|p| p.name = "Ne green line fine resolution".into()),
+                "Ne_green_line_fine_resolution",
+            ),
+            (
+                "unsafe characters",
+                plan(|p| p.name = " a/b:c ".into()),
+                "a_b_c",
+            ),
+            (
+                "blank name",
+                plan(|p| p.name = "  ".into()),
+                "700.0-750.0_0.1_750_3",
+            ),
+        ];
+        for (name, plan, want) in cases {
+            assert_eq!(plan.file_stem(), want, "{name}");
         }
     }
 }

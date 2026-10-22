@@ -15,11 +15,13 @@ use eframe::egui;
 use egui_plot::{HoverPosition, Line, Plot, PlotPoints, Points};
 use serialport::SerialPort;
 use spectraplot::event::Event;
-use spectraplot::recent::Recent;
+use spectraplot::history::History;
+use spectraplot::plan::ScanPlan;
+use spectraplot::presets::Presets;
 
 use document::Document;
 use menu::Action;
-use planner::Planner;
+use planner::{Planner, PlannerAction};
 
 type Port = Box<dyn SerialPort>;
 
@@ -34,7 +36,9 @@ struct App {
     port: Option<Port>,
     planner: Planner,
     doc: Document,
-    recent: Recent,
+    recent: History<PathBuf>,
+    plans: History<ScanPlan>,
+    presets: Presets,
     scanning: bool,
     last_grating: Option<u8>,
     status: String,
@@ -46,12 +50,16 @@ impl App {
             Some(_) => "connected".into(),
             None => "no device, start with --port to scan".into(),
         };
+        let plans = files::load_plans();
+        let planner = Planner::new(plans.latest().cloned().unwrap_or_default());
         Self {
             events,
             port,
-            planner: Planner::default(),
+            planner,
             doc: Document::default(),
             recent: files::load_recent(),
+            plans,
+            presets: files::load_presets(),
             scanning: false,
             last_grating: None,
             status,
@@ -79,9 +87,10 @@ impl App {
         let plan = &self.planner.plan;
         match device::send_line(port.as_mut(), &plan.to_command()) {
             Ok(()) => {
-                self.doc = Document::default();
+                self.doc = Document::for_scan(format!("{}_{}", plan.file_stem(), timestamp()));
                 self.scanning = true;
                 self.last_grating = Some(plan.grating);
+                self.remember_plan();
             }
             Err(e) => self.status = format!("send failed: {e}"),
         }
@@ -92,6 +101,7 @@ impl App {
             self.status = "cannot open while a scan is running".into();
             return;
         }
+        let stem = self.doc.suggested_stem();
         let result = match action {
             Action::Open => files::pick_open().map(|p| self.open(&p)),
             Action::OpenRecent(p) => Some(self.open(&p)),
@@ -99,16 +109,16 @@ impl App {
                 .doc
                 .path
                 .clone()
-                .or_else(files::pick_save)
+                .or_else(|| files::pick_save(&stem))
                 .map(|p| self.save(&p)),
-            Action::SaveAs => files::pick_save().map(|p| self.save(&p)),
+            Action::SaveAs => files::pick_save(&stem).map(|p| self.save(&p)),
             Action::Export => self
                 .doc
                 .export_path
                 .clone()
-                .or_else(files::pick_export)
+                .or_else(|| files::pick_export(&stem))
                 .map(|p| self.export(&p)),
-            Action::ExportAs => files::pick_export().map(|p| self.export(&p)),
+            Action::ExportAs => files::pick_export(&stem).map(|p| self.export(&p)),
         };
         match result {
             None => self.status = "no file chosen".into(),
@@ -120,6 +130,16 @@ impl App {
     fn open(&mut self, path: &Path) -> Result<(), String> {
         self.doc = Document::open(path).map_err(|e| failed("open", path, &e))?;
         self.remember(path);
+        if let Some(plan) = self
+            .doc
+            .scan
+            .header
+            .as_deref()
+            .and_then(ScanPlan::from_header)
+        {
+            self.planner.plan = plan;
+            self.remember_plan();
+        }
         self.status = format!("opened {}", path.display());
         Ok(())
     }
@@ -140,9 +160,30 @@ impl App {
     }
 
     fn remember(&mut self, path: &Path) {
-        self.recent.push(&absolute(path));
+        self.recent.push(absolute(path));
         if let Err(e) = files::store_recent(&self.recent) {
             eprintln!("cannot store recent files: {e}");
+        }
+    }
+
+    fn remember_plan(&mut self) {
+        self.plans.push(self.planner.plan.rounded());
+        if let Err(e) = files::store_plans(&self.plans) {
+            eprintln!("cannot store scan settings: {e}");
+        }
+    }
+
+    fn handle_planner(&mut self, action: PlannerAction) {
+        match action {
+            PlannerAction::Start => {
+                self.start_scan();
+                return;
+            }
+            PlannerAction::SavePreset => self.presets.save(self.planner.plan.rounded()),
+            PlannerAction::DeletePreset => self.presets.remove(&self.planner.plan.name),
+        }
+        if let Err(e) = files::store_presets(&self.presets) {
+            self.status = format!("cannot store presets: {e}");
         }
     }
 
@@ -151,8 +192,15 @@ impl App {
         ui.separator();
         let can_start = self.port.is_some() && !self.scanning;
         let grating_changes = self.last_grating != Some(self.planner.plan.grating);
-        if self.planner.show(ui, can_start, grating_changes) {
-            self.start_scan();
+        let action = self.planner.show(
+            ui,
+            can_start,
+            grating_changes,
+            &self.presets,
+            &self.plans.items,
+        );
+        if let Some(action) = action {
+            self.handle_planner(action);
         }
         ui.separator();
         ui.small(&self.status);
@@ -201,6 +249,14 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ui, |ui| self.plot(ui));
         ui.ctx().request_repaint_after(Duration::from_millis(200));
     }
+
+    fn on_exit(&mut self) {
+        self.remember_plan();
+    }
+}
+
+fn timestamp() -> String {
+    jiff::Zoned::now().strftime("%Y%m%d-%H%M%S").to_string()
 }
 
 fn failed(what: &str, path: &Path, e: &io::Error) -> String {

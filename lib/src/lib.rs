@@ -16,7 +16,8 @@ mod tests {
 }
 pub mod event;
 pub mod plan;
-pub mod recent;
+pub mod history;
 pub mod sample;
 pub mod scan;
 pub mod svg;
+pub mod presets;

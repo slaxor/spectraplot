@@ -2,13 +2,20 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use spectraplot::recent::Recent;
+use spectraplot::history::History;
+use spectraplot::plan::ScanPlan;
+use spectraplot::presets::Presets;
 use spectraplot::scan::Scan;
 use spectraplot::svg;
 
 const DAT: &str = "dat";
 const CSV: &str = "csv";
 const SVG: &str = "svg";
+const RECENT: &str = "recent";
+const RECENT_LIMIT: usize = 10;
+const PLANS: &str = "plans";
+const PLANS_LIMIT: usize = 20;
+const PRESETS: &str = "presets";
 
 /// Loads a `.dat` file or a raw device log.
 pub fn open(path: &Path) -> io::Result<Scan> {
@@ -43,50 +50,78 @@ pub fn pick_open() -> Option<PathBuf> {
         .pick_file()
 }
 
-/// Asks where to save, suggesting a `.dat` file.
-pub fn pick_save() -> Option<PathBuf> {
+/// Asks where to save, suggesting `stem.dat`.
+pub fn pick_save(stem: &str) -> Option<PathBuf> {
     rfd::FileDialog::new()
         .add_filter("scan", &[DAT])
-        .set_file_name("scan.dat")
+        .set_file_name(format!("{stem}.{DAT}"))
         .save_file()
 }
 
-/// Asks where to export; the chosen extension selects the format.
-pub fn pick_export() -> Option<PathBuf> {
+/// Asks where to export, suggesting `stem.csv`; the chosen extension selects the format.
+pub fn pick_export(stem: &str) -> Option<PathBuf> {
     rfd::FileDialog::new()
         .add_filter("table", &[CSV])
         .add_filter("plot", &[SVG])
-        .set_file_name("scan.csv")
+        .set_file_name(format!("{stem}.{CSV}"))
         .save_file()
 }
 
-/// Loads the recent-files list; a missing file means no history yet.
-pub fn load_recent() -> Recent {
-    match fs::read_to_string(recent_path()) {
-        Ok(text) => Recent::parse(&text),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Recent::default(),
+/// Loads the recently used files.
+pub fn load_recent() -> History<PathBuf> {
+    History::parse(&read_state(RECENT), RECENT_LIMIT, |line| {
+        (!line.is_empty()).then(|| PathBuf::from(line))
+    })
+}
+
+/// Stores the recently used files.
+pub fn store_recent(recent: &History<PathBuf>) -> io::Result<()> {
+    write_state(RECENT, &recent.to_text(|path| path.display().to_string()))
+}
+
+/// Loads the recently used scan settings, newest first.
+pub fn load_plans() -> History<ScanPlan> {
+    History::parse(&read_state(PLANS), PLANS_LIMIT, ScanPlan::from_line)
+}
+
+/// Stores the recently used scan settings.
+pub fn store_plans(plans: &History<ScanPlan>) -> io::Result<()> {
+    write_state(PLANS, &plans.to_text(ScanPlan::to_line))
+}
+
+/// Loads the named scan settings.
+pub fn load_presets() -> Presets {
+    Presets::parse(&read_state(PRESETS))
+}
+
+/// Stores the named scan settings.
+pub fn store_presets(presets: &Presets) -> io::Result<()> {
+    write_state(PRESETS, &presets.to_text())
+}
+
+fn read_state(name: &str) -> String {
+    match fs::read_to_string(state_dir().join(name)) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
         Err(e) => {
-            eprintln!("cannot read recent files: {e}");
-            Recent::default()
+            eprintln!("cannot read {name}: {e}");
+            String::new()
         }
     }
 }
 
-/// Stores the recent-files list.
-pub fn store_recent(recent: &Recent) -> io::Result<()> {
-    let path = recent_path();
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir)?;
-    }
-    fs::write(path, recent.to_text())
+fn write_state(name: &str, text: &str) -> io::Result<()> {
+    let dir = state_dir();
+    fs::create_dir_all(&dir)?;
+    fs::write(dir.join(name), text)
 }
 
-fn recent_path() -> PathBuf {
+fn state_dir() -> PathBuf {
     let state = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
         .unwrap_or_default();
-    state.join("spectraplot").join("recent")
+    state.join("spectraplot")
 }
 
 fn extension(path: &Path) -> String {

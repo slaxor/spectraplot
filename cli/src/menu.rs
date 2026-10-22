@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use eframe::egui;
-use spectraplot::recent::Recent;
+use spectraplot::history::History;
 
 /// What the user picked from the File menu.
 pub enum Action {
@@ -14,7 +14,7 @@ pub enum Action {
 }
 
 /// Draws the menu bar; returns the chosen action, if any.
-pub fn file_menu(ui: &mut egui::Ui, recent: &Recent) -> Option<Action> {
+pub fn file_menu(ui: &mut egui::Ui, recent: &History<PathBuf>) -> Option<Action> {
     let mut action = None;
     egui::MenuBar::new().ui(ui, |ui| {
         ui.menu_button("File", |ui| {
@@ -24,14 +24,14 @@ pub fn file_menu(ui: &mut egui::Ui, recent: &Recent) -> Option<Action> {
     action
 }
 
-fn entries(ui: &mut egui::Ui, recent: &Recent) -> Option<Action> {
+fn entries(ui: &mut egui::Ui, recent: &History<PathBuf>) -> Option<Action> {
     let mut action = None;
     if ui.button("Open…").clicked() {
         action = Some(Action::Open);
     }
-    ui.add_enabled_ui(!recent.paths.is_empty(), |ui| {
+    ui.add_enabled_ui(!recent.items.is_empty(), |ui| {
         ui.menu_button("Open Recent", |ui| {
-            for path in &recent.paths {
+            for path in &recent.items {
                 if ui.button(path.display().to_string()).clicked() {
                     action = Some(Action::OpenRecent(path.clone()));
                 }
