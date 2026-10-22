@@ -16,6 +16,7 @@ const RECENT_LIMIT: usize = 10;
 const PLANS: &str = "plans";
 const PLANS_LIMIT: usize = 20;
 const PRESETS: &str = "presets";
+const PORT: &str = "port";
 
 /// Loads a `.dat` file or a raw device log.
 pub fn open(path: &Path) -> io::Result<Scan> {
@@ -97,6 +98,17 @@ pub fn load_presets() -> Presets {
 /// Stores the named scan settings.
 pub fn store_presets(presets: &Presets) -> io::Result<()> {
     write_state(PRESETS, &presets.to_text())
+}
+
+/// The serial port used last, if any.
+pub fn load_port() -> Option<String> {
+    let port = read_state(PORT).trim().to_string();
+    (!port.is_empty()).then_some(port)
+}
+
+/// Remembers the serial port for the next start.
+pub fn store_port(path: &str) -> io::Result<()> {
+    write_state(PORT, &format!("{path}\n"))
 }
 
 fn read_state(name: &str) -> String {

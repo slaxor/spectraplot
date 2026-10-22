@@ -6,24 +6,20 @@ mod menu;
 mod planner;
 
 use std::io;
-use std::io::BufReader;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use eframe::egui;
 use egui_plot::{HoverPosition, Line, Plot, PlotPoints, Points};
-use serialport::SerialPort;
 use spectraplot::event::Event;
 use spectraplot::history::History;
 use spectraplot::plan::ScanPlan;
 use spectraplot::presets::Presets;
 
+use device::Connection;
 use document::Document;
-use menu::Action;
+use menu::{Action, FileAction};
 use planner::{Planner, PlannerAction};
-
-type Port = Box<dyn SerialPort>;
 
 fn cursor_label(hover: &HoverPosition<'_>) -> Option<String> {
     let (HoverPosition::NearDataPoint { position, .. } | HoverPosition::Elsewhere { position }) =
@@ -32,8 +28,7 @@ fn cursor_label(hover: &HoverPosition<'_>) -> Option<String> {
 }
 
 struct App {
-    events: Option<Receiver<Event>>,
-    port: Option<Port>,
+    connection: Option<Connection>,
     planner: Planner,
     doc: Document,
     recent: History<PathBuf>,
@@ -45,16 +40,11 @@ struct App {
 }
 
 impl App {
-    fn new(port: Option<Port>, events: Option<Receiver<Event>>) -> Self {
-        let status = match port {
-            Some(_) => "connected".into(),
-            None => "no device, start with --port to scan".into(),
-        };
+    fn new() -> Self {
         let plans = files::load_plans();
         let planner = Planner::new(plans.latest().cloned().unwrap_or_default());
         Self {
-            events,
-            port,
+            connection: None,
             planner,
             doc: Document::default(),
             recent: files::load_recent(),
@@ -62,13 +52,15 @@ impl App {
             presets: files::load_presets(),
             scanning: false,
             last_grating: None,
-            status,
+            status: "not connected, pick a port in the Port menu".into(),
         }
     }
 
     fn drain_events(&mut self) {
-        let Some(events) = &self.events else { return };
-        for event in events.try_iter() {
+        let Some(connection) = &self.connection else {
+            return;
+        };
+        for event in connection.events.try_iter() {
             match event {
                 Event::ScanDone => {
                     self.scanning = false;
@@ -81,11 +73,11 @@ impl App {
     }
 
     fn start_scan(&mut self) {
-        let Some(port) = self.port.as_mut() else {
+        let Some(connection) = self.connection.as_mut() else {
             return;
         };
         let plan = &self.planner.plan;
-        match device::send_line(port.as_mut(), &plan.to_command()) {
+        match connection.send_line(&plan.to_command()) {
             Ok(()) => {
                 self.doc = Document::for_scan(format!("{}_{}", plan.file_stem(), timestamp()));
                 self.scanning = true;
@@ -97,28 +89,56 @@ impl App {
     }
 
     fn handle(&mut self, action: Action) {
-        if self.scanning && matches!(action, Action::Open | Action::OpenRecent(_)) {
+        match action {
+            Action::File(action) => self.handle_file(action),
+            Action::Connect(path) => self.connect(&path),
+            Action::Disconnect => self.disconnect(),
+        }
+    }
+
+    fn connect(&mut self, path: &str) {
+        self.connection = None;
+        match Connection::open(path) {
+            Ok(connection) => {
+                self.connection = Some(connection);
+                self.status = format!("connected to {path}");
+                if let Err(e) = files::store_port(path) {
+                    eprintln!("cannot store port: {e}");
+                }
+            }
+            Err(e) => self.status = format!("cannot open {path}: {e}"),
+        }
+    }
+
+    fn disconnect(&mut self) {
+        self.connection = None;
+        self.scanning = false;
+        self.status = "disconnected".into();
+    }
+
+    fn handle_file(&mut self, action: FileAction) {
+        if self.scanning && matches!(action, FileAction::Open | FileAction::OpenRecent(_)) {
             self.status = "cannot open while a scan is running".into();
             return;
         }
         let stem = self.doc.suggested_stem();
         let result = match action {
-            Action::Open => files::pick_open().map(|p| self.open(&p)),
-            Action::OpenRecent(p) => Some(self.open(&p)),
-            Action::Save => self
+            FileAction::Open => files::pick_open().map(|p| self.open(&p)),
+            FileAction::OpenRecent(p) => Some(self.open(&p)),
+            FileAction::Save => self
                 .doc
                 .path
                 .clone()
                 .or_else(|| files::pick_save(&stem))
                 .map(|p| self.save(&p)),
-            Action::SaveAs => files::pick_save(&stem).map(|p| self.save(&p)),
-            Action::Export => self
+            FileAction::SaveAs => files::pick_save(&stem).map(|p| self.save(&p)),
+            FileAction::Export => self
                 .doc
                 .export_path
                 .clone()
                 .or_else(|| files::pick_export(&stem))
                 .map(|p| self.export(&p)),
-            Action::ExportAs => files::pick_export(&stem).map(|p| self.export(&p)),
+            FileAction::ExportAs => files::pick_export(&stem).map(|p| self.export(&p)),
         };
         match result {
             None => self.status = "no file chosen".into(),
@@ -190,7 +210,7 @@ impl App {
     fn planner_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading(self.doc.title());
         ui.separator();
-        let can_start = self.port.is_some() && !self.scanning;
+        let can_start = self.connection.is_some() && !self.scanning;
         let grating_changes = self.last_grating != Some(self.planner.plan.grating);
         let action = self.planner.show(
             ui,
@@ -239,8 +259,11 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.drain_events();
+        let connected = self.connection.as_ref().map(|c| c.path.as_str());
         let action = egui::Panel::top("menu")
-            .show(ui, |ui| menu::file_menu(ui, &self.recent))
+            .show(ui, |ui| {
+                menu::bar(ui, &self.recent, connected, !self.scanning)
+            })
             .inner;
         if let Some(action) = action {
             self.handle(action);
@@ -267,20 +290,13 @@ fn absolute(path: &Path) -> PathBuf {
     std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn connect(port: Option<String>) -> serialport::Result<(Option<Port>, Option<Receiver<Event>>)> {
-    let Some(path) = port else {
-        return Ok((None, None));
-    };
-    let port = device::open_port(&path)?;
-    let reader = BufReader::new(port.try_clone()?);
-    Ok((Some(port), Some(device::spawn_reader(reader))))
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
     let args = args::parse(std::env::args().skip(1))?;
-    let (port, events) = connect(args.port)?;
-    let mut app = App::new(port, events);
+    let mut app = App::new();
+    if let Some(port) = args.port.or_else(files::load_port) {
+        app.connect(&port);
+    }
     if let Some(Err(e)) = args.file.map(|f| app.open(Path::new(&f))) {
         app.status = e;
     }
