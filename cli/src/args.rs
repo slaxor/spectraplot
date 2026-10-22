@@ -1,8 +1,8 @@
-/// Command line: `specplot [--port DEVICE] [CSV]`.
+/// Command line: `spectraplot [--port DEVICE] [FILE]`.
 #[derive(Debug, Default, PartialEq)]
 pub struct Args {
     pub port: Option<String>,
-    pub csv: Option<String>,
+    pub file: Option<String>,
 }
 
 /// Parses the arguments after the program name.
@@ -13,7 +13,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
         match arg.as_str() {
             "--port" => parsed.port = Some(args.next().ok_or("--port needs a device")?),
             _ if arg.starts_with('-') => return Err(format!("unknown option {arg}")),
-            _ if parsed.csv.is_none() => parsed.csv = Some(arg),
+            _ if parsed.file.is_none() => parsed.file = Some(arg),
             _ => return Err(format!("unexpected argument {arg}")),
         }
     }
@@ -24,10 +24,10 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
 mod tests {
     use super::*;
 
-    fn args(port: Option<&str>, csv: Option<&str>) -> Args {
+    fn args(port: Option<&str>, file: Option<&str>) -> Args {
         Args {
             port: port.map(Into::into),
-            csv: csv.map(Into::into),
+            file: file.map(Into::into),
         }
     }
 
@@ -35,7 +35,7 @@ mod tests {
     fn parse() {
         let cases = [
             ("nothing", vec![], Ok(args(None, None))),
-            ("csv", vec!["scan.csv"], Ok(args(None, Some("scan.csv")))),
+            ("file", vec!["scan.dat"], Ok(args(None, Some("scan.dat")))),
             (
                 "port",
                 vec!["--port", "/dev/ttyACM0"],
@@ -43,8 +43,8 @@ mod tests {
             ),
             (
                 "both",
-                vec!["scan.csv", "--port", "/dev/ttyACM0"],
-                Ok(args(Some("/dev/ttyACM0"), Some("scan.csv"))),
+                vec!["scan.dat", "--port", "/dev/ttyACM0"],
+                Ok(args(Some("/dev/ttyACM0"), Some("scan.dat"))),
             ),
             (
                 "port without device",
@@ -57,9 +57,9 @@ mod tests {
                 Err("unknown option -v".into()),
             ),
             (
-                "two csvs",
-                vec!["a.csv", "b.csv"],
-                Err("unexpected argument b.csv".into()),
+                "two files",
+                vec!["a.dat", "b.dat"],
+                Err("unexpected argument b.dat".into()),
             ),
         ];
         for (name, argv, want) in cases {

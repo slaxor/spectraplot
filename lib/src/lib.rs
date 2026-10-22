@@ -1,4 +1,4 @@
-//! specplot core library.
+//! spectraplot core library.
 
 /// Returns a greeting for `name`.
 pub fn greet(name: &str) -> String {
@@ -16,4 +16,7 @@ mod tests {
 }
 pub mod event;
 pub mod plan;
+pub mod recent;
 pub mod sample;
+pub mod scan;
+pub mod svg;

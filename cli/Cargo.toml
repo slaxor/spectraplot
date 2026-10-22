@@ -1,15 +1,17 @@
 [package]
-name = "specplot-cli"
+name = "spectraplot-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "specplot"
+name = "spectraplot"
 path = "src/main.rs"
 
 [dependencies]
 eframe = "0.36.2"
 egui_plot = "0.37.0"
+env_logger = "0.11.11"
+rfd = "0.17.2"
 serialport = { version = "4.10.1", default-features = false }
-specplot = { path = "../lib" }
+spectraplot = { path = "../lib" }

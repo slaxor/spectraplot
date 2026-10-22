@@ -1,5 +1,5 @@
 [package]
-name = "specplot"
+name = "spectraplot"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

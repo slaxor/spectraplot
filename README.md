@@ -1,4 +1,4 @@
-# specplot
+# spectraplot
 
 ## Layout
 

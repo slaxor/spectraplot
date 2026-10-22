@@ -1,6 +1,6 @@
 #!/usr/bin/env -S gnuplot -c
 
-if (ARGC < 1) { print "usage: specplot.gp FILE"; exit status 1 }
+if (ARGC < 1) { print "usage: spectraplot.gp FILE"; exit status 1 }
 file = ARG1
 
 set datafile separator ","

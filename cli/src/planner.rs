@@ -1,5 +1,5 @@
 use eframe::egui;
-use specplot::plan::{Problem, ScanPlan, GRATINGS, HV_VOLTS};
+use spectraplot::plan::{GRATINGS, HV_VOLTS, Problem, ScanPlan};
 
 const MAX_READS: u8 = 20;
 
