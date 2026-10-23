@@ -11,6 +11,8 @@ pub enum Action {
     Connect(String),
     Disconnect,
     ToggleConsole,
+    Help(&'static str),
+    DeviceHelp,
 }
 
 /// An entry of the File menu.
@@ -44,7 +46,29 @@ pub fn bar(
                 action = Some(Action::ToggleConsole);
             }
         });
+        ui.menu_button("Help", |ui| action = help_entries(ui));
     });
+    action
+}
+
+fn help_entries(ui: &mut egui::Ui) -> Option<Action> {
+    let mut action = None;
+    if ui.button("Guide  F1").clicked() {
+        action = Some(Action::Help("Getting started"));
+    }
+    if ui.button("Keys").clicked() {
+        action = Some(Action::Help("Keys"));
+    }
+    if ui.button("Measuring tips").clicked() {
+        action = Some(Action::Help("Measuring tips"));
+    }
+    if ui.button("Device commands").clicked() {
+        action = Some(Action::DeviceHelp);
+    }
+    ui.separator();
+    if ui.button("About spectraplot").clicked() {
+        action = Some(Action::Help("About"));
+    }
     action
 }
 

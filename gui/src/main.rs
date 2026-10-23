@@ -3,6 +3,7 @@ mod console;
 mod device;
 mod document;
 mod files;
+mod help;
 mod menu;
 mod planner;
 
@@ -20,6 +21,7 @@ use spectraplot::presets::Presets;
 use console::Console;
 use device::Connection;
 use document::Document;
+use help::Help;
 use menu::{Action, FileAction};
 use planner::{Planner, PlannerAction};
 
@@ -32,6 +34,7 @@ fn cursor_label(hover: &HoverPosition<'_>) -> Option<String> {
 struct App {
     connection: Option<Connection>,
     console: Console,
+    help: Help,
     planner: Planner,
     doc: Document,
     recent: History<PathBuf>,
@@ -48,6 +51,7 @@ impl App {
         Self {
             connection: None,
             console: Console::default(),
+            help: Help::default(),
             planner,
             doc: Document::default(),
             recent: files::load_recent(),
@@ -125,7 +129,16 @@ impl App {
             Action::Connect(path) => self.connect(&path),
             Action::Disconnect => self.disconnect(),
             Action::ToggleConsole => self.console.toggle(),
+            Action::Help(title) => self.help.open_at(title),
+            Action::DeviceHelp => self.device_help(),
         }
+    }
+
+    fn device_help(&mut self) {
+        if !self.console.open {
+            self.console.toggle();
+        }
+        self.send_command("help");
     }
 
     fn connect(&mut self, path: &str) {
@@ -328,6 +341,10 @@ impl eframe::App for App {
         if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F12)) {
             self.console.toggle();
         }
+        if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F1)) {
+            self.help.open_at("Getting started");
+        }
+        self.help.show(ui.ctx());
         self.console_panel(ui);
         egui::Panel::left("planner").show(ui, |ui| self.planner_panel(ui));
         egui::CentralPanel::default().show(ui, |ui| self.plot(ui));
