@@ -1,5 +1,6 @@
 use std::fmt;
 use std::ops::RangeInclusive;
+use std::time::Duration;
 
 /// One grating of the SpectraPro-275 turret.
 #[derive(Debug, Clone, PartialEq)]
@@ -55,6 +56,9 @@ pub const PMT_NM: RangeInclusive<f64> = 185.0..=900.0;
 /// PMT high voltage the planner allows.
 pub const HV_VOLTS: RangeInclusive<u16> = 0..=1000;
 
+/// PMT integration time per step the planner allows.
+pub const INTEGRATION_MS: RangeInclusive<u32> = 1..=60_000;
+
 /// Something wrong or questionable about a plan.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Problem {
@@ -64,7 +68,7 @@ pub enum Problem {
     NotOneDecimal(&'static str),
     OutsideDrive,
     HvOutOfRange,
-    NoReads,
+    IntegrationOutOfRange,
     OutsideGratingOptimum(u8),
     OutsidePmtRange,
 }
@@ -97,7 +101,12 @@ impl fmt::Display for Problem {
                 HV_VOLTS.start(),
                 HV_VOLTS.end()
             ),
-            Self::NoReads => write!(f, "at least one read per step"),
+            Self::IntegrationOutOfRange => write!(
+                f,
+                "integration time must be within {}–{} ms",
+                INTEGRATION_MS.start(),
+                INTEGRATION_MS.end()
+            ),
             Self::OutsideGratingOptimum(id) => {
                 write!(f, "range leaves the optimum of grating {id}")
             }
@@ -113,7 +122,7 @@ impl fmt::Display for Problem {
     }
 }
 
-/// Parameters of one `range-scan`.
+/// Parameters of one `SCAN`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScanPlan {
     pub name: String,
@@ -122,7 +131,7 @@ pub struct ScanPlan {
     pub end_nm: f64,
     pub step_nm: f64,
     pub hv: u16,
-    pub reads: u8,
+    pub integration_ms: u32,
 }
 
 impl Default for ScanPlan {
@@ -134,7 +143,7 @@ impl Default for ScanPlan {
             end_nm: 750.0,
             step_nm: 0.1,
             hv: 750,
-            reads: 3,
+            integration_ms: 100,
         }
     }
 }
@@ -179,8 +188,8 @@ impl ScanPlan {
         if !HV_VOLTS.contains(&self.hv) {
             found.push(Problem::HvOutOfRange);
         }
-        if self.reads == 0 {
-            found.push(Problem::NoReads);
+        if !INTEGRATION_MS.contains(&self.integration_ms) {
+            found.push(Problem::IntegrationOutOfRange);
         }
         found
     }
@@ -198,11 +207,16 @@ impl ScanPlan {
         ((self.end_nm - self.start_nm) / self.step_nm).round() as usize + 1
     }
 
+    /// Time spent integrating, without the moves between steps.
+    pub fn integration_total(&self) -> Duration {
+        Duration::from_millis(self.steps() as u64 * u64::from(self.integration_ms))
+    }
+
     /// The spectractrl command line, formatted the way the drive accepts it.
     pub fn to_command(&self) -> String {
         format!(
-            "{} {:.1} {:.1} {:.1} {} {} range-scan",
-            self.grating, self.start_nm, self.end_nm, self.step_nm, self.hv, self.reads
+            "{} {:.1} {:.1} {:.1} {} {} SCAN",
+            self.grating, self.start_nm, self.end_nm, self.step_nm, self.hv, self.integration_ms
         )
     }
 
@@ -220,10 +234,10 @@ impl ScanPlan {
     /// Reads back a line written by [`ScanPlan::to_command`].
     pub fn from_command(line: &str) -> Option<Self> {
         let fields: Vec<&str> = line.split_whitespace().collect();
-        let [grating, start, end, step, hv, reads, word] = fields[..] else {
+        let [grating, start, end, step, hv, integration, word] = fields[..] else {
             return None;
         };
-        if !word.eq_ignore_ascii_case("range-scan") {
+        if !word.eq_ignore_ascii_case("SCAN") {
             return None;
         }
         Some(Self {
@@ -233,12 +247,13 @@ impl ScanPlan {
             end_nm: end.parse().ok()?,
             step_nm: step.parse().ok()?,
             hv: hv.parse().ok()?,
-            reads: reads.parse().ok()?,
+            integration_ms: integration.parse().ok()?,
         })
     }
 
     /// Reads the plan from a scan header such as
-    /// `grating 2, 700.0..750.0 nm, step 0.1 nm, 750 V, 3 reads per step`.
+    /// `grating 2, 700.0..750.0 nm, step 0.1 nm, 750 V, 800 ms integration`;
+    /// the last part only needs to hold a number of milliseconds.
     ///
     /// Point measurements and scans without a set voltage yield `None`.
     pub fn from_header(header: &str) -> Option<Self> {
@@ -247,7 +262,7 @@ impl ScanPlan {
         let (start, end) = parts.next()?.strip_suffix(" nm")?.split_once("..")?;
         let step = parts.next()?.strip_prefix("step ")?.strip_suffix(" nm")?;
         let hv = parts.next()?.strip_suffix(" V")?;
-        let reads = parts.next()?.strip_suffix(" reads per step")?;
+        let integration_ms = milliseconds(parts.next()?)?;
         Some(Self {
             name: String::new(),
             grating: grating.parse().ok()?,
@@ -255,7 +270,7 @@ impl ScanPlan {
             end_nm: end.parse().ok()?,
             step_nm: step.parse().ok()?,
             hv: hv.parse().ok()?,
-            reads: reads.parse().ok()?,
+            integration_ms,
         })
     }
 
@@ -286,7 +301,7 @@ impl ScanPlan {
         }
         format!(
             "{:.1}-{:.1}_{:.1}_{}_{}",
-            self.start_nm, self.end_nm, self.step_nm, self.hv, self.reads
+            self.start_nm, self.end_nm, self.step_nm, self.hv, self.integration_ms
         )
     }
 
@@ -299,6 +314,14 @@ impl ScanPlan {
             ..self.clone()
         }
     }
+}
+
+fn milliseconds(part: &str) -> Option<u32> {
+    if !part.contains("ms") {
+        return None;
+    }
+    part.split_whitespace()
+        .find_map(|word| word.trim_end_matches("ms").parse().ok())
 }
 
 fn sanitise(name: &str) -> String {
@@ -363,7 +386,11 @@ mod tests {
                 plan(|p| p.hv = 1200),
                 vec![Problem::HvOutOfRange],
             ),
-            ("no reads", plan(|p| p.reads = 0), vec![Problem::NoReads]),
+            (
+                "no integration",
+                plan(|p| p.integration_ms = 0),
+                vec![Problem::IntegrationOutOfRange],
+            ),
             (
                 "outside optimum",
                 plan(|p| p.grating = 1),
@@ -380,7 +407,7 @@ mod tests {
         let cases = [
             ("default", plan(|_| {}), true),
             ("warning only", plan(|p| p.grating = 1), true),
-            ("blocking", plan(|p| p.reads = 0), false),
+            ("blocking", plan(|p| p.integration_ms = 0), false),
         ];
         for (name, plan, want) in cases {
             assert_eq!(plan.is_runnable(), want, "{name}");
@@ -407,7 +434,7 @@ mod tests {
             (
                 "today's scan",
                 plan(|_| {}),
-                "2 700.0 750.0 0.1 750 3 range-scan",
+                "2 700.0 750.0 0.1 750 100 SCAN",
             ),
             (
                 "integral values",
@@ -417,12 +444,12 @@ mod tests {
                     p.end_nm = 500.0;
                     p.step_nm = 1.0;
                 }),
-                "3 400.0 500.0 1.0 750 3 range-scan",
+                "3 400.0 500.0 1.0 750 100 SCAN",
             ),
             (
                 "float noise",
                 plan(|p| p.start_nm = 700.1 + 0.2 - 0.2),
-                "2 700.1 750.0 0.1 750 3 range-scan",
+                "2 700.1 750.0 0.1 750 100 SCAN",
             ),
         ];
         for (name, plan, want) in cases {
@@ -439,21 +466,18 @@ mod tests {
                 Some(ScanPlan::default()),
             ),
             (
-                "upper case",
-                "2 700.0 750.0 0.1 750 3 RANGE-SCAN".into(),
+                "lower case",
+                "2 700.0 750.0 0.1 750 100 scan".into(),
                 Some(ScanPlan::default()),
             ),
             ("other macro", "2 700.0 3 POINT-MEASURE".into(), None),
             (
-                "missing field",
-                "2 700.0 750.0 0.1 750 range-scan".into(),
+                "old range-scan",
+                "2 700.0 750.0 0.1 750 3 range-scan".into(),
                 None,
             ),
-            (
-                "bad number",
-                "2 700.0 750.0 0.1 x 3 range-scan".into(),
-                None,
-            ),
+            ("missing field", "2 700.0 750.0 0.1 750 SCAN".into(), None),
+            ("bad number", "2 700.0 750.0 0.1 x 100 SCAN".into(), None),
             ("empty", String::new(), None),
         ];
         for (name, line, want) in cases {
@@ -466,17 +490,27 @@ mod tests {
         let cases = [
             (
                 "range scan",
-                "grating 2, 700.0..750.0 nm, step 0.1 nm, 750 V, 3 reads per step",
+                "grating 2, 700.0..750.0 nm, step 0.1 nm, 750 V, 100 ms integration",
                 Some(ScanPlan::default()),
             ),
             (
+                "unit attached",
+                "grating 2, 700.0..750.0 nm, step 0.1 nm, 750 V, integration 100ms",
+                Some(ScanPlan::default()),
+            ),
+            (
+                "old reads header",
+                "grating 2, 700.0..750.0 nm, step 0.1 nm, 750 V, 3 reads per step",
+                None,
+            ),
+            (
                 "point measure",
-                "grating 1, at 300.5 nm, 750 V, 5 reads per step",
+                "grating 1, at 300.5 nm, 750 V, 800 ms integration",
                 None,
             ),
             (
                 "voltage unchanged",
-                "grating 2, 700.0..750.0 nm, step 0.1 nm, PMT voltage unchanged, 3 reads per step",
+                "grating 2, 700.0..750.0 nm, step 0.1 nm, PMT voltage unchanged, 800 ms integration",
                 None,
             ),
             ("junk", "hello", None),
@@ -503,15 +537,11 @@ mod tests {
     fn line_roundtrip() {
         let named = plan(|p| p.name = "Ne green line fine resolution".into());
         let cases = [
-            (
-                "unnamed",
-                plan(|_| {}),
-                "2 700.0 750.0 0.1 750 3 range-scan",
-            ),
+            ("unnamed", plan(|_| {}), "2 700.0 750.0 0.1 750 100 SCAN"),
             (
                 "named",
                 named,
-                "2 700.0 750.0 0.1 750 3 range-scan # Ne green line fine resolution",
+                "2 700.0 750.0 0.1 750 100 SCAN # Ne green line fine resolution",
             ),
         ];
         for (name, plan, want) in cases {
@@ -523,7 +553,7 @@ mod tests {
     #[test]
     fn file_stem() {
         let cases = [
-            ("unnamed", plan(|_| {}), "700.0-750.0_0.1_750_3"),
+            ("unnamed", plan(|_| {}), "700.0-750.0_0.1_750_100"),
             (
                 "named",
                 plan(|p| p.name = "Ne green line fine resolution".into()),
@@ -537,11 +567,27 @@ mod tests {
             (
                 "blank name",
                 plan(|p| p.name = "  ".into()),
-                "700.0-750.0_0.1_750_3",
+                "700.0-750.0_0.1_750_100",
             ),
         ];
         for (name, plan, want) in cases {
             assert_eq!(plan.file_stem(), want, "{name}");
+        }
+    }
+
+    #[test]
+    fn integration_total() {
+        let cases = [
+            ("default", plan(|_| {}), Duration::from_millis(501 * 100)),
+            (
+                "single step",
+                plan(|p| p.end_nm = p.start_nm),
+                Duration::from_millis(100),
+            ),
+            ("no steps", plan(|p| p.step_nm = 0.0), Duration::ZERO),
+        ];
+        for (name, plan, want) in cases {
+            assert_eq!(plan.integration_total(), want, "{name}");
         }
     }
 }

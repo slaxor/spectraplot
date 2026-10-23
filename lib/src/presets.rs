@@ -114,8 +114,7 @@ mod tests {
 
     #[test]
     fn parse_skips_unnamed() {
-        let text =
-            "2 700.0 750.0 0.1 750 3 range-scan\n2 700.0 750.0 0.1 750 3 range-scan # kept\n";
+        let text = "2 700.0 750.0 0.1 750 100 SCAN\n2 700.0 750.0 0.1 750 100 SCAN # kept\n";
         assert_eq!(Presets::parse(text), presets(&[named("kept", 750)]));
     }
 }

@@ -59,7 +59,7 @@ pub struct PortChoice {
     pub label: String,
 }
 
-/// Lists the serial ports present right now, sorted by path.
+/// Lists the USB serial ports present right now, sorted by path.
 pub fn list_ports() -> Vec<PortChoice> {
     let mut ports = match serialport::available_ports() {
         Ok(ports) => ports,
@@ -68,8 +68,13 @@ pub fn list_ports() -> Vec<PortChoice> {
             Vec::new()
         }
     };
+    ports.retain(is_usb);
     ports.sort_by(|a, b| a.port_name.cmp(&b.port_name));
     ports.iter().map(choice).collect()
+}
+
+fn is_usb(info: &SerialPortInfo) -> bool {
+    matches!(info.port_type, SerialPortType::UsbPort(_))
 }
 
 fn choice(info: &SerialPortInfo) -> PortChoice {
@@ -122,7 +127,7 @@ fn read_events(mut input: impl BufRead, tx: &Sender<Event>, stop: &AtomicBool) {
 }
 
 fn report(tx: &Sender<Event>, message: String) {
-    tx.send(Event::Other(message)).ok();
+    tx.send(Event::Disconnected(message)).ok();
 }
 
 #[cfg(test)]
@@ -148,7 +153,7 @@ mod tests {
                 reads: vec![1441],
             }),
             Event::ScanDone,
-            Event::Other("device closed the connection".into()),
+            Event::Disconnected("device closed the connection".into()),
         ];
         assert_eq!(events, want);
     }

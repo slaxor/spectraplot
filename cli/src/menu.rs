@@ -23,34 +23,36 @@ pub enum FileAction {
 }
 
 /// Draws the menu bar; returns the chosen action, if any.
-/// `connected` is the open port; `can_switch` is false while a scan runs.
+/// `connected` is the open port; ports cannot be switched while a scan runs.
 pub fn bar(
     ui: &mut egui::Ui,
     recent: &History<PathBuf>,
     connected: Option<&str>,
-    can_switch: bool,
+    scanning: bool,
 ) -> Option<Action> {
     let mut action = None;
     egui::MenuBar::new().ui(ui, |ui| {
         ui.menu_button("File", |ui| {
             action = file_entries(ui, recent).map(Action::File)
         });
-        ui.menu_button("Port", |ui| {
-            ui.add_enabled_ui(can_switch, |ui| action = port_entries(ui, connected));
-        });
+        ui.menu_button("Port", |ui| action = port_entries(ui, connected, scanning));
     });
     action
 }
 
-fn port_entries(ui: &mut egui::Ui, connected: Option<&str>) -> Option<Action> {
+fn port_entries(ui: &mut egui::Ui, connected: Option<&str>, scanning: bool) -> Option<Action> {
     let mut action = None;
     let ports = device::list_ports();
     if ports.is_empty() {
-        ui.weak("no serial ports found");
+        ui.weak("no USB serial ports found");
+    }
+    if let Some(path) = connected.filter(|path| !ports.iter().any(|p| p.path == *path)) {
+        ui.add_enabled(false, egui::Button::selectable(true, path));
     }
     for port in ports {
         let is_open = connected == Some(port.path.as_str());
-        if ui.selectable_label(is_open, port.label).clicked() {
+        let entry = egui::Button::selectable(is_open, port.label);
+        if ui.add_enabled(!scanning, entry).clicked() {
             action = Some(Action::Connect(port.path));
         }
     }

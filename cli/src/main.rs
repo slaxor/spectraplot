@@ -35,7 +35,6 @@ struct App {
     plans: History<ScanPlan>,
     presets: Presets,
     scanning: bool,
-    last_grating: Option<u8>,
     status: String,
 }
 
@@ -51,7 +50,6 @@ impl App {
             plans,
             presets: files::load_presets(),
             scanning: false,
-            last_grating: None,
             status: "not connected, pick a port in the Port menu".into(),
         }
     }
@@ -60,11 +58,21 @@ impl App {
         let Some(connection) = &self.connection else {
             return;
         };
-        for event in connection.events.try_iter() {
+        let events: Vec<Event> = connection.events.try_iter().collect();
+        for event in events {
             match event {
                 Event::ScanDone => {
                     self.scanning = false;
                     self.status = "scan done".into();
+                }
+                Event::ScanStopped(line) => {
+                    self.scanning = false;
+                    self.status = line;
+                }
+                Event::Disconnected(reason) => {
+                    self.connection = None;
+                    self.scanning = false;
+                    self.status = reason;
                 }
                 Event::Other(line) => self.status = line,
                 event => self.doc.dirty |= self.doc.scan.apply(event),
@@ -81,10 +89,18 @@ impl App {
             Ok(()) => {
                 self.doc = Document::for_scan(format!("{}_{}", plan.file_stem(), timestamp()));
                 self.scanning = true;
-                self.last_grating = Some(plan.grating);
                 self.remember_plan();
             }
             Err(e) => self.status = format!("send failed: {e}"),
+        }
+    }
+
+    fn abort_scan(&mut self) {
+        let Some(connection) = self.connection.as_mut() else {
+            return;
+        };
+        if let Err(e) = connection.send_line("abort scan") {
+            self.status = format!("send failed: {e}");
         }
     }
 
@@ -199,6 +215,10 @@ impl App {
                 self.start_scan();
                 return;
             }
+            PlannerAction::Abort => {
+                self.abort_scan();
+                return;
+            }
             PlannerAction::SavePreset => self.presets.save(self.planner.plan.rounded()),
             PlannerAction::DeletePreset => self.presets.remove(&self.planner.plan.name),
         }
@@ -210,12 +230,10 @@ impl App {
     fn planner_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading(self.doc.title());
         ui.separator();
-        let can_start = self.connection.is_some() && !self.scanning;
-        let grating_changes = self.last_grating != Some(self.planner.plan.grating);
         let action = self.planner.show(
             ui,
-            can_start,
-            grating_changes,
+            self.connection.is_some(),
+            self.scanning,
             &self.presets,
             &self.plans.items,
         );
@@ -227,7 +245,10 @@ impl App {
     }
 
     fn plot(&self, ui: &mut egui::Ui) {
+        let plan = &self.planner.plan;
         Plot::new("scan")
+            .include_x(plan.start_nm)
+            .include_x(plan.end_nm)
             .x_axis_label("nm")
             .y_axis_label("PMT")
             .label_formatter(cursor_label)
@@ -262,7 +283,7 @@ impl eframe::App for App {
         let connected = self.connection.as_ref().map(|c| c.path.as_str());
         let action = egui::Panel::top("menu")
             .show(ui, |ui| {
-                menu::bar(ui, &self.recent, connected, !self.scanning)
+                menu::bar(ui, &self.recent, connected, self.scanning)
             })
             .inner;
         if let Some(action) = action {

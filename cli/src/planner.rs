@@ -1,17 +1,21 @@
-use eframe::egui;
-use spectraplot::plan::{GRATINGS, HV_VOLTS, Problem, ScanPlan};
-use spectraplot::presets::Presets;
+use std::time::Duration;
 
-const MAX_READS: u8 = 20;
+use eframe::egui;
+use spectraplot::plan::{GRATINGS, HV_VOLTS, INTEGRATION_MS, Problem, ScanPlan};
+use spectraplot::presets::Presets;
 
 /// What the user asked for in the planner panel.
 pub enum PlannerAction {
     Start,
+    Abort,
     SavePreset,
     DeletePreset,
 }
 
-/// The scan parameter panel, including the grating-change confirmation.
+/// Scans with at least this much pure integration time ask before starting.
+const LONG_SCAN: Duration = Duration::from_secs(10 * 60);
+
+/// The scan parameter panel, including the confirmation for long scans.
 pub struct Planner {
     pub plan: ScanPlan,
     confirming: bool,
@@ -30,8 +34,8 @@ impl Planner {
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
-        can_start: bool,
-        grating_changes: bool,
+        connected: bool,
+        scanning: bool,
         presets: &Presets,
         recent: &[ScanPlan],
     ) -> Option<PlannerAction> {
@@ -39,17 +43,25 @@ impl Planner {
         let preset_action = name_row(ui, &mut self.plan.name, presets);
         params(ui, &mut self.plan);
         ui.separator();
-        ui.label(format!("{} steps", self.plan.steps()));
+        ui.label(format!(
+            "{} steps, at least {}",
+            self.plan.steps(),
+            minutes_seconds(self.plan.integration_total())
+        ));
         ui.monospace(self.plan.to_command());
         problems(ui, &self.plan.problems());
         ui.separator();
-        let start = self.start_buttons(ui, can_start && self.plan.is_runnable(), grating_changes);
+        if scanning {
+            let abort = ui.button("abort scan").clicked();
+            return abort.then_some(PlannerAction::Abort).or(preset_action);
+        }
+        let start = self.start_buttons(ui, connected && self.plan.is_runnable());
         start.then_some(PlannerAction::Start).or(preset_action)
     }
 
-    fn start_buttons(&mut self, ui: &mut egui::Ui, enabled: bool, grating_changes: bool) -> bool {
+    fn start_buttons(&mut self, ui: &mut egui::Ui, enabled: bool) -> bool {
         if self.confirming {
-            return self.confirm_grating_change(ui);
+            return self.confirm_long_scan(ui);
         }
         if !ui
             .add_enabled(enabled, egui::Button::new("start scan"))
@@ -57,14 +69,16 @@ impl Planner {
         {
             return false;
         }
-        self.confirming = grating_changes;
-        !grating_changes
+        let long = self.plan.integration_total() >= LONG_SCAN;
+        self.confirming = long;
+        !long
     }
 
-    fn confirm_grating_change(&mut self, ui: &mut egui::Ui) -> bool {
+    fn confirm_long_scan(&mut self, ui: &mut egui::Ui) -> bool {
+        let duration = minutes_seconds(self.plan.integration_total());
         ui.colored_label(
             ui.visuals().warn_fg_color,
-            "grating change can block the drive for minutes",
+            format!("this scan takes at least {duration}"),
         );
         let mut start = false;
         ui.horizontal(|ui| {
@@ -131,6 +145,11 @@ fn name_row(ui: &mut egui::Ui, name: &mut String, presets: &Presets) -> Option<P
     action
 }
 
+fn minutes_seconds(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    format!("{} min {:02} s", seconds / 60, seconds % 60)
+}
+
 fn params(ui: &mut egui::Ui, plan: &mut ScanPlan) {
     egui::Grid::new("plan").num_columns(2).show(ui, |ui| {
         ui.label("grating");
@@ -146,8 +165,12 @@ fn params(ui: &mut egui::Ui, plan: &mut ScanPlan) {
                 .suffix(" V"),
         );
         ui.end_row();
-        ui.label("reads");
-        ui.add(egui::DragValue::new(&mut plan.reads).range(1..=MAX_READS));
+        ui.label("integration");
+        ui.add(
+            egui::DragValue::new(&mut plan.integration_ms)
+                .range(INTEGRATION_MS)
+                .suffix(" ms"),
+        );
         ui.end_row();
     });
 }

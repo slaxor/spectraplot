@@ -8,6 +8,8 @@ pub enum Event {
     Header(String),
     Sample(Sample),
     ScanDone,
+    ScanStopped(String),
+    Disconnected(String),
     Other(String),
 }
 
@@ -21,6 +23,9 @@ impl Event {
         }
         if line.starts_with("[scan:done]") {
             return Some(Self::ScanDone);
+        }
+        if line.starts_with("[scan:fail]") || line.starts_with("[scan:abort]") {
+            return Some(Self::ScanStopped(line.to_string()));
         }
         if let Some(header) = line.trim_start_matches(SCAN_OUT).trim().strip_prefix('#') {
             return Some(Self::Header(header.trim().to_string()));
@@ -103,6 +108,16 @@ mod tests {
                 Some(Event::ScanDone),
             ),
             ("bare prompt", "> ", Some(Event::Other(">".into()))),
+            (
+                "scan failed",
+                "> \r\x1b[K[scan:fail] PS-445 timed out\r\n",
+                Some(Event::ScanStopped("[scan:fail] PS-445 timed out".into())),
+            ),
+            (
+                "scan aborted",
+                "[scan:abort] by request",
+                Some(Event::ScanStopped("[scan:abort] by request".into())),
+            ),
         ];
         for (name, line, want) in cases {
             assert_eq!(Event::parse(line), want, "{name}");
