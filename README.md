@@ -3,7 +3,7 @@
 ## Layout
 
 - `lib/` — core library, public API
-- `cli/` — thin binary, consumes `lib`'s public API only
+- `gui/` — thin binary, consumes `lib`'s public API only
 
 ## Dev shell
 

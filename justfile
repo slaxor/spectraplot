@@ -18,4 +18,4 @@ fix:
     cargo fmt --all
 
 run *args:
-    cargo run -p spectraplot-cli -- {{args}}
+    cargo run -p spectraplot-gui -- {{args}}

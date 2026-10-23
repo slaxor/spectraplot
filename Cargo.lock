@@ -3175,7 +3175,7 @@ name = "spectraplot"
 version = "0.1.0"
 
 [[package]]
-name = "spectraplot-cli"
+name = "spectraplot-gui"
 version = "0.1.0"
 dependencies = [
  "eframe",
