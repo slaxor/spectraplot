@@ -1,4 +1,5 @@
 mod args;
+mod console;
 mod device;
 mod document;
 mod files;
@@ -16,6 +17,7 @@ use spectraplot::history::History;
 use spectraplot::plan::ScanPlan;
 use spectraplot::presets::Presets;
 
+use console::Console;
 use device::Connection;
 use document::Document;
 use menu::{Action, FileAction};
@@ -29,6 +31,7 @@ fn cursor_label(hover: &HoverPosition<'_>) -> Option<String> {
 
 struct App {
     connection: Option<Connection>,
+    console: Console,
     planner: Planner,
     doc: Document,
     recent: History<PathBuf>,
@@ -44,6 +47,7 @@ impl App {
         let planner = Planner::new(plans.latest().cloned().unwrap_or_default());
         Self {
             connection: None,
+            console: Console::default(),
             planner,
             doc: Document::default(),
             recent: files::load_recent(),
@@ -58,9 +62,10 @@ impl App {
         let Some(connection) = &self.connection else {
             return;
         };
-        let events: Vec<Event> = connection.events.try_iter().collect();
-        for event in events {
-            match event {
+        let messages: Vec<_> = connection.messages.try_iter().collect();
+        for message in messages {
+            self.console.push(message.text);
+            match message.event {
                 Event::ScanDone => {
                     self.scanning = false;
                     self.status = "scan done".into();
@@ -95,6 +100,16 @@ impl App {
         }
     }
 
+    fn send_command(&mut self, command: &str) {
+        let Some(connection) = self.connection.as_mut() else {
+            self.console.push("not connected".into());
+            return;
+        };
+        if let Err(e) = connection.send_line(command) {
+            self.console.push(format!("send failed: {e}"));
+        }
+    }
+
     fn abort_scan(&mut self) {
         let Some(connection) = self.connection.as_mut() else {
             return;
@@ -109,6 +124,7 @@ impl App {
             Action::File(action) => self.handle_file(action),
             Action::Connect(path) => self.connect(&path),
             Action::Disconnect => self.disconnect(),
+            Action::ToggleConsole => self.console.toggle(),
         }
     }
 
@@ -227,6 +243,20 @@ impl App {
         }
     }
 
+    fn console_panel(&mut self, ui: &mut egui::Ui) {
+        let mut open = self.console.open;
+        let command = egui::Panel::top("console")
+            .resizable(true)
+            .default_size(300.0)
+            .drag_to_open(false)
+            .show_collapsible(ui, &mut open, |ui| self.console.show(ui))
+            .and_then(|response| response.inner);
+        self.console.open = open;
+        if let Some(command) = command {
+            self.send_command(&command);
+        }
+    }
+
     fn planner_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading(self.doc.title());
         ui.separator();
@@ -283,12 +313,22 @@ impl eframe::App for App {
         let connected = self.connection.as_ref().map(|c| c.path.as_str());
         let action = egui::Panel::top("menu")
             .show(ui, |ui| {
-                menu::bar(ui, &self.recent, connected, self.scanning)
+                menu::bar(
+                    ui,
+                    &self.recent,
+                    connected,
+                    self.scanning,
+                    self.console.open,
+                )
             })
             .inner;
         if let Some(action) = action {
             self.handle(action);
         }
+        if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F12)) {
+            self.console.toggle();
+        }
+        self.console_panel(ui);
         egui::Panel::left("planner").show(ui, |ui| self.planner_panel(ui));
         egui::CentralPanel::default().show(ui, |ui| self.plot(ui));
         ui.ctx().request_repaint_after(Duration::from_millis(200));

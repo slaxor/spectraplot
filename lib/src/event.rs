@@ -16,8 +16,8 @@ pub enum Event {
 impl Event {
     /// Classifies a line of device output; blank lines yield `None`.
     pub fn parse(raw: &str) -> Option<Self> {
-        let cleaned = strip_escapes(raw);
-        let line = last_redraw(&cleaned).trim();
+        let cleaned = clean(raw);
+        let line = cleaned.as_str();
         if line.is_empty() {
             return None;
         }
@@ -32,6 +32,12 @@ impl Event {
         }
         Some(Sample::parse(line).map_or_else(|| Self::Other(line.to_string()), Self::Sample))
     }
+}
+
+/// The text a terminal would show for a received line: escape sequences removed,
+/// an overwritten prompt dropped, surrounding whitespace trimmed.
+pub fn clean(raw: &str) -> String {
+    last_redraw(&strip_escapes(raw)).trim().to_string()
 }
 
 /// Removes ANSI CSI sequences like the `ESC [ K` the console sends before each event.
@@ -121,6 +127,23 @@ mod tests {
         ];
         for (name, line, want) in cases {
             assert_eq!(Event::parse(line), want, "{name}");
+        }
+    }
+
+    #[test]
+    fn clean() {
+        let cases = [
+            (
+                "event",
+                "> \r\x1b[K[scan:out] 700.0,1441\r\n",
+                "[scan:out] 700.0,1441",
+            ),
+            ("echoed command", "> nop\r\n", "> nop"),
+            ("plain reply", "ok\r\n", "ok"),
+            ("blank", "\r\n", ""),
+        ];
+        for (name, raw, want) in cases {
+            assert_eq!(super::clean(raw), want, "{name}");
         }
     }
 }

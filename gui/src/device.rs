@@ -5,16 +5,23 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
 use serialport::{SerialPort, SerialPortInfo, SerialPortType};
-use spectraplot::event::Event;
+use spectraplot::event::{self, Event};
 
 const BAUD: u32 = 115_200;
 const READ_TIMEOUT: Duration = Duration::from_secs(1);
 const LINE_END: &str = "\r";
 
+/// One received line as a terminal would show it, and what it means.
+#[derive(Debug, PartialEq)]
+pub struct Message {
+    pub text: String,
+    pub event: Event,
+}
+
 /// An open spectractrl port with its reader thread; dropping it stops the reader.
 pub struct Connection {
     pub path: String,
-    pub events: Receiver<Event>,
+    pub messages: Receiver<Message>,
     port: Box<dyn SerialPort>,
     stop: Arc<AtomicBool>,
 }
@@ -29,10 +36,10 @@ impl Connection {
         }
         let stop = Arc::new(AtomicBool::new(false));
         let reader = BufReader::new(port.try_clone()?);
-        let events = spawn_reader(reader, Arc::clone(&stop));
+        let messages = spawn_reader(reader, Arc::clone(&stop));
         Ok(Self {
             path: path.to_string(),
-            events,
+            messages,
             port,
             stop,
         })
@@ -100,22 +107,22 @@ fn label(info: &SerialPortInfo) -> String {
     }
 }
 
-fn spawn_reader(input: impl BufRead + Send + 'static, stop: Arc<AtomicBool>) -> Receiver<Event> {
+fn spawn_reader(input: impl BufRead + Send + 'static, stop: Arc<AtomicBool>) -> Receiver<Message> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || read_events(input, &tx, &stop));
     rx
 }
 
-fn read_events(mut input: impl BufRead, tx: &Sender<Event>, stop: &AtomicBool) {
+fn read_events(mut input: impl BufRead, tx: &Sender<Message>, stop: &AtomicBool) {
     let mut line = String::new();
     while !stop.load(Ordering::Relaxed) {
         match input.read_line(&mut line) {
             Ok(0) => return report(tx, "device closed the connection".into()),
             Ok(_) => {
-                let event = Event::parse(&line);
+                let text = event::clean(&line);
                 line.clear();
-                if let Some(event) = event
-                    && tx.send(event).is_err()
+                if let Some(event) = Event::parse(&text)
+                    && tx.send(Message { text, event }).is_err()
                 {
                     return;
                 }
@@ -126,8 +133,13 @@ fn read_events(mut input: impl BufRead, tx: &Sender<Event>, stop: &AtomicBool) {
     }
 }
 
-fn report(tx: &Sender<Event>, message: String) {
-    tx.send(Event::Disconnected(message)).ok();
+fn report(tx: &Sender<Message>, reason: String) {
+    let event = Event::Disconnected(reason.clone());
+    tx.send(Message {
+        text: reason,
+        event,
+    })
+    .ok();
 }
 
 #[cfg(test)]
@@ -137,34 +149,45 @@ mod tests {
     use spectraplot::sample::Sample;
     use std::io::Cursor;
 
+    fn message(text: &str, event: Event) -> Message {
+        Message {
+            text: text.into(),
+            event,
+        }
+    }
+
     #[test]
-    fn reader_forwards_events_until_eof() {
-        let input =
-            "scan started\n\n[scan:out] # grating 2\n[scan:out] 700.0,1441\n[scan:done] 1 steps\n";
+    fn reader_forwards_messages_until_eof() {
+        let input = "scan started\n\n> \r\x1b[K[scan:out] 700.0,1441\r\n[scan:done] 1 steps\n";
         let stop = Arc::new(AtomicBool::new(false));
-        let events: Vec<Event> = spawn_reader(Cursor::new(input.to_string()), stop)
+        let messages: Vec<Message> = spawn_reader(Cursor::new(input.to_string()), stop)
             .iter()
             .collect();
         let want = vec![
-            Event::Other("scan started".into()),
-            Event::Header("grating 2".into()),
-            Event::Sample(Sample {
-                nm: 700.0,
-                reads: vec![1441],
-            }),
-            Event::ScanDone,
-            Event::Disconnected("device closed the connection".into()),
+            message("scan started", Event::Other("scan started".into())),
+            message(
+                "[scan:out] 700.0,1441",
+                Event::Sample(Sample {
+                    nm: 700.0,
+                    reads: vec![1441],
+                }),
+            ),
+            message("[scan:done] 1 steps", Event::ScanDone),
+            message(
+                "device closed the connection",
+                Event::Disconnected("device closed the connection".into()),
+            ),
         ];
-        assert_eq!(events, want);
+        assert_eq!(messages, want);
     }
 
     #[test]
     fn reader_stops_when_asked() {
         let stop = Arc::new(AtomicBool::new(true));
-        let events: Vec<Event> = spawn_reader(Cursor::new("700.0,1\n".to_string()), stop)
+        let messages: Vec<Message> = spawn_reader(Cursor::new("700.0,1\n".to_string()), stop)
             .iter()
             .collect();
-        assert_eq!(events, vec![]);
+        assert_eq!(messages, vec![]);
     }
 
     fn usb(manufacturer: Option<&str>, product: Option<&str>) -> SerialPortType {

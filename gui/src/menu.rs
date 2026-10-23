@@ -10,6 +10,7 @@ pub enum Action {
     File(FileAction),
     Connect(String),
     Disconnect,
+    ToggleConsole,
 }
 
 /// An entry of the File menu.
@@ -29,6 +30,7 @@ pub fn bar(
     recent: &History<PathBuf>,
     connected: Option<&str>,
     scanning: bool,
+    console_open: bool,
 ) -> Option<Action> {
     let mut action = None;
     egui::MenuBar::new().ui(ui, |ui| {
@@ -36,6 +38,12 @@ pub fn bar(
             action = file_entries(ui, recent).map(Action::File)
         });
         ui.menu_button("Port", |ui| action = port_entries(ui, connected, scanning));
+        ui.menu_button("View", |ui| {
+            let console = egui::Button::selectable(console_open, "Console  F12");
+            if ui.add(console).clicked() {
+                action = Some(Action::ToggleConsole);
+            }
+        });
     });
     action
 }
