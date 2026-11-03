@@ -24,24 +24,26 @@ impl Presets {
             .collect()
     }
 
-    /// Stores `plan` under its name, replacing a preset of the same name.
+    /// Stores `plan` under its trimmed name, replacing a preset of the same name.
     pub fn save(&mut self, plan: ScanPlan) {
-        if plan.name.trim().is_empty() {
+        let name = plan.name.trim().to_string();
+        if name.is_empty() {
             return;
         }
-        self.remove(&plan.name);
+        self.remove(&name);
+        let plan = ScanPlan { name, ..plan };
         self.items.push(plan);
         self.items.sort_by(|a, b| a.name.cmp(&b.name));
     }
 
     /// Forgets the preset called `name`.
     pub fn remove(&mut self, name: &str) {
-        self.items.retain(|plan| plan.name != name);
+        self.items.retain(|plan| plan.name != name.trim());
     }
 
     /// True if a preset is called `name`.
     pub fn contains(&self, name: &str) -> bool {
-        self.items.iter().any(|plan| plan.name == name)
+        self.items.iter().any(|plan| plan.name == name.trim())
     }
 }
 
@@ -82,6 +84,18 @@ mod tests {
                 "replaces same name",
                 presets(&[named("a", 750)]),
                 named("a", 900),
+                presets(&[named("a", 900)]),
+            ),
+            (
+                "trims the name",
+                presets(&[]),
+                named("  a ", 750),
+                presets(&[named("a", 750)]),
+            ),
+            (
+                "same name differing in spaces replaces",
+                presets(&[named("a", 750)]),
+                named("a ", 900),
                 presets(&[named("a", 900)]),
             ),
             (

@@ -40,13 +40,22 @@ pub const SECTIONS: &[Section] = &[
         title: "Planner",
         body: &[
             Block::Table(&[
-                (
-                    "settings…",
-                    "presets by name, then the last 20 settings used",
-                ),
+                ("presets…", "the presets you saved; a click loads one"),
                 (
                     "name",
-                    "optional; names a preset and the suggested file name",
+                    "optional; names the suggested file name and, with save preset, a preset",
+                ),
+                (
+                    "save / update preset",
+                    "stores the settings under the name; a name exists once",
+                ),
+                (
+                    "delete preset",
+                    "forgets the preset with the name in the field",
+                ),
+                (
+                    "swap start/end",
+                    "reverses the scan; a start above the end scans downward",
                 ),
                 ("grating G1", "600 l/mm, blaze 300 nm, best 200–450 nm"),
                 ("grating G2", "600 l/mm, blaze 750 nm, best 500–1100 nm"),
@@ -68,8 +77,9 @@ pub const SECTIONS: &[Section] = &[
                  they start. While a scan runs, abort scan stops it.",
             ),
             Block::Text(
-                "The planner always opens with the settings used last; opening a file \
-                 loads the settings from its header.",
+                "Nothing becomes a preset unless you press save preset. Only the settings \
+                 used last are remembered automatically: the planner opens with them, and \
+                 opening a file loads the settings from its header.",
             ),
         ],
     },
@@ -132,7 +142,7 @@ pub const SECTIONS: &[Section] = &[
             Block::Text("Settings live in ~/.local/state/spectraplot:"),
             Block::Table(&[
                 ("recent", "recently opened files"),
-                ("plans", "recently used scan settings"),
+                ("last", "the scan settings used last"),
                 ("presets", "named scan settings"),
                 ("port", "the serial port to reconnect to"),
             ]),

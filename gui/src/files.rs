@@ -13,8 +13,8 @@ const CSV: &str = "csv";
 const SVG: &str = "svg";
 const RECENT: &str = "recent";
 const RECENT_LIMIT: usize = 10;
-const PLANS: &str = "plans";
-const PLANS_LIMIT: usize = 20;
+const LAST: &str = "last";
+const LEGACY_PLANS: &str = "plans";
 const PRESETS: &str = "presets";
 const PORT: &str = "port";
 
@@ -80,14 +80,20 @@ pub fn store_recent(recent: &History<PathBuf>) -> io::Result<()> {
     write_state(RECENT, &recent.to_text(|path| path.display().to_string()))
 }
 
-/// Loads the recently used scan settings, newest first.
-pub fn load_plans() -> History<ScanPlan> {
-    History::parse(&read_state(PLANS), PLANS_LIMIT, ScanPlan::from_line)
+/// Loads the scan settings used last; older versions kept them in `plans`.
+pub fn load_last() -> Option<ScanPlan> {
+    let last = read_state(LAST);
+    let text = if last.trim().is_empty() {
+        read_state(LEGACY_PLANS)
+    } else {
+        last
+    };
+    ScanPlan::first_of(&text)
 }
 
-/// Stores the recently used scan settings.
-pub fn store_plans(plans: &History<ScanPlan>) -> io::Result<()> {
-    write_state(PLANS, &plans.to_text(ScanPlan::to_line))
+/// Remembers the scan settings used last, replacing the previous ones.
+pub fn store_last(plan: &ScanPlan) -> io::Result<()> {
+    write_state(LAST, &format!("{}\n", plan.to_line()))
 }
 
 /// Loads the named scan settings.

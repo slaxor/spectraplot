@@ -37,14 +37,18 @@ impl Planner {
         connected: bool,
         scanning: bool,
         presets: &Presets,
-        recent: &[ScanPlan],
     ) -> Option<PlannerAction> {
-        choose_plan(ui, &mut self.plan, presets, recent);
+        choose_preset(ui, &mut self.plan, presets);
         let preset_action = name_row(ui, &mut self.plan.name, presets);
         params(ui, &mut self.plan);
         ui.separator();
+        let direction = if self.plan.is_reversed() {
+            ", downward"
+        } else {
+            ""
+        };
         ui.label(format!(
-            "{} steps, at least {}",
+            "{} steps{direction}, at least {}",
             self.plan.steps(),
             minutes_seconds(self.plan.integration_total())
         ));
@@ -91,33 +95,21 @@ impl Planner {
     }
 }
 
-fn choose_plan(ui: &mut egui::Ui, plan: &mut ScanPlan, presets: &Presets, recent: &[ScanPlan]) {
+fn choose_preset(ui: &mut egui::Ui, plan: &mut ScanPlan, presets: &Presets) {
     egui::ComboBox::from_id_salt("settings")
-        .selected_text("settings…")
+        .selected_text("presets…")
         .width(ui.available_width())
         .show_ui(ui, |ui| {
-            plan_section(ui, plan, "presets", &presets.items, |p| p.name.clone());
-            ui.separator();
-            plan_section(ui, plan, "recent", recent, ScanPlan::to_line);
+            if presets.items.is_empty() {
+                ui.weak("none saved yet");
+            }
+            for preset in &presets.items {
+                let current = !plan.name.is_empty() && plan.name == preset.name;
+                if ui.selectable_label(current, &preset.name).clicked() {
+                    *plan = preset.clone();
+                }
+            }
         });
-}
-
-fn plan_section(
-    ui: &mut egui::Ui,
-    plan: &mut ScanPlan,
-    title: &str,
-    candidates: &[ScanPlan],
-    label: impl Fn(&ScanPlan) -> String,
-) {
-    ui.weak(title);
-    for candidate in candidates {
-        if ui
-            .selectable_label(*plan == *candidate, label(candidate))
-            .clicked()
-        {
-            *plan = candidate.clone();
-        }
-    }
 }
 
 fn name_row(ui: &mut egui::Ui, name: &mut String, presets: &Presets) -> Option<PlannerAction> {
@@ -129,10 +121,12 @@ fn name_row(ui: &mut egui::Ui, name: &mut String, presets: &Presets) -> Option<P
     let known = presets.contains(name);
     let mut action = None;
     ui.horizontal(|ui| {
-        if ui
-            .add_enabled(named, egui::Button::new("save preset"))
-            .clicked()
-        {
+        let save = if known {
+            "update preset"
+        } else {
+            "save preset"
+        };
+        if ui.add_enabled(named, egui::Button::new(save)).clicked() {
             action = Some(PlannerAction::SavePreset);
         }
         if ui
@@ -157,6 +151,11 @@ fn params(ui: &mut egui::Ui, plan: &mut ScanPlan) {
         ui.end_row();
         nm_row(ui, "start", &mut plan.start_nm);
         nm_row(ui, "end", &mut plan.end_nm);
+        ui.label("");
+        if ui.button("swap start/end").clicked() {
+            *plan = plan.reversed();
+        }
+        ui.end_row();
         nm_row(ui, "step", &mut plan.step_nm);
         ui.label("HV");
         ui.add(

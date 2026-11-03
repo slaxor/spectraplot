@@ -9,7 +9,7 @@ mod planner;
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use egui_plot::{HoverPosition, Line, Plot, PlotPoints, Points};
@@ -31,33 +31,37 @@ fn cursor_label(hover: &HoverPosition<'_>) -> Option<String> {
     Some(format!("{:.2} nm\n{:.0}", position.x, position.y))
 }
 
+/// How long after the current step's integration an abort may take to be confirmed.
+const ABORT_MARGIN: Duration = Duration::from_secs(5);
+
 struct App {
+    ctx: egui::Context,
     connection: Option<Connection>,
     console: Console,
     help: Help,
     planner: Planner,
     doc: Document,
     recent: History<PathBuf>,
-    plans: History<ScanPlan>,
     presets: Presets,
     scanning: bool,
+    abort_deadline: Option<Instant>,
     status: String,
 }
 
 impl App {
-    fn new() -> Self {
-        let plans = files::load_plans();
-        let planner = Planner::new(plans.latest().cloned().unwrap_or_default());
+    fn new(ctx: egui::Context) -> Self {
+        let planner = Planner::new(files::load_last().unwrap_or_default());
         Self {
+            ctx,
             connection: None,
             console: Console::default(),
             help: Help::default(),
             planner,
             doc: Document::default(),
             recent: files::load_recent(),
-            plans,
             presets: files::load_presets(),
             scanning: false,
+            abort_deadline: None,
             status: "not connected, pick a port in the Port menu".into(),
         }
     }
@@ -90,37 +94,46 @@ impl App {
     }
 
     fn start_scan(&mut self) {
-        let Some(connection) = self.connection.as_mut() else {
+        let Some(connection) = &self.connection else {
             return;
         };
         let plan = &self.planner.plan;
-        match connection.send_line(&plan.to_command()) {
-            Ok(()) => {
-                self.doc = Document::for_scan(format!("{}_{}", plan.file_stem(), timestamp()));
-                self.scanning = true;
-                self.remember_plan();
-            }
-            Err(e) => self.status = format!("send failed: {e}"),
-        }
+        connection.send_line(&plan.to_command());
+        self.doc = Document::for_scan(format!("{}_{}", plan.file_stem(), timestamp()));
+        self.scanning = true;
+        self.abort_deadline = None;
+        self.remember_last();
     }
 
     fn send_command(&mut self, command: &str) {
-        let Some(connection) = self.connection.as_mut() else {
-            self.console.push("not connected".into());
-            return;
-        };
-        if let Err(e) = connection.send_line(command) {
-            self.console.push(format!("send failed: {e}"));
+        match &self.connection {
+            Some(connection) => connection.send_line(command),
+            None => self.console.push("not connected".into()),
         }
     }
 
     fn abort_scan(&mut self) {
-        let Some(connection) = self.connection.as_mut() else {
+        let Some(connection) = &self.connection else {
             return;
         };
-        if let Err(e) = connection.send_line("abort scan") {
-            self.status = format!("send failed: {e}");
+        connection.send_line("abort scan");
+        let wait = Duration::from_millis(self.planner.plan.integration_ms.into()) + ABORT_MARGIN;
+        self.abort_deadline = Some(Instant::now() + wait);
+        self.status = "abort sent, waiting for the device".into();
+        wake_after(&self.ctx, wait);
+    }
+
+    fn give_up_on_abort(&mut self) {
+        let overdue = self
+            .abort_deadline
+            .is_some_and(|deadline| Instant::now() >= deadline);
+        if !self.scanning || !overdue {
+            return;
         }
+        self.scanning = false;
+        self.abort_deadline = None;
+        self.status = "device did not confirm the abort; stopped waiting".into();
+        self.console.push(self.status.clone());
     }
 
     fn handle(&mut self, action: Action) {
@@ -141,9 +154,22 @@ impl App {
         self.send_command("help");
     }
 
+    /// Builds the app inside eframe, connects and opens what the command line asks for.
+    fn start(ctx: egui::Context, args: args::Args) -> Self {
+        let mut app = Self::new(ctx);
+        if let Some(port) = args.port.or_else(files::load_port) {
+            app.connect(&port);
+        }
+        if let Some(Err(e)) = args.file.map(|f| app.open(Path::new(&f))) {
+            app.status = e;
+        }
+        app
+    }
+
     fn connect(&mut self, path: &str) {
         self.connection = None;
-        match Connection::open(path) {
+        let ctx = self.ctx.clone();
+        match Connection::open(path, move || ctx.request_repaint()) {
             Ok(connection) => {
                 self.connection = Some(connection);
                 self.status = format!("connected to {path}");
@@ -203,7 +229,7 @@ impl App {
             .and_then(ScanPlan::from_header)
         {
             self.planner.plan = plan;
-            self.remember_plan();
+            self.remember_last();
         }
         self.status = format!("opened {}", path.display());
         Ok(())
@@ -231,9 +257,8 @@ impl App {
         }
     }
 
-    fn remember_plan(&mut self) {
-        self.plans.push(self.planner.plan.rounded());
-        if let Err(e) = files::store_plans(&self.plans) {
+    fn remember_last(&self) {
+        if let Err(e) = files::store_last(&self.planner.plan.rounded()) {
             eprintln!("cannot store scan settings: {e}");
         }
     }
@@ -248,12 +273,30 @@ impl App {
                 self.abort_scan();
                 return;
             }
-            PlannerAction::SavePreset => self.presets.save(self.planner.plan.rounded()),
-            PlannerAction::DeletePreset => self.presets.remove(&self.planner.plan.name),
+            PlannerAction::SavePreset => self.save_preset(),
+            PlannerAction::DeletePreset => self.delete_preset(),
         }
         if let Err(e) = files::store_presets(&self.presets) {
             self.status = format!("cannot store presets: {e}");
         }
+    }
+
+    fn save_preset(&mut self) {
+        let plan = self.planner.plan.rounded();
+        let name = plan.name.trim().to_string();
+        let verb = if self.presets.contains(&name) {
+            "updated"
+        } else {
+            "saved"
+        };
+        self.presets.save(plan);
+        self.status = format!("{verb} preset {name}");
+    }
+
+    fn delete_preset(&mut self) {
+        let name = self.planner.plan.name.trim().to_string();
+        self.presets.remove(&name);
+        self.status = format!("deleted preset {name}");
     }
 
     fn console_panel(&mut self, ui: &mut egui::Ui) {
@@ -273,13 +316,9 @@ impl App {
     fn planner_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading(self.doc.title());
         ui.separator();
-        let action = self.planner.show(
-            ui,
-            self.connection.is_some(),
-            self.scanning,
-            &self.presets,
-            &self.plans.items,
-        );
+        let action = self
+            .planner
+            .show(ui, self.connection.is_some(), self.scanning, &self.presets);
         if let Some(action) = action {
             self.handle_planner(action);
         }
@@ -323,6 +362,7 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.drain_events();
+        self.give_up_on_abort();
         let connected = self.connection.as_ref().map(|c| c.path.as_str());
         let action = egui::Panel::top("menu")
             .show(ui, |ui| {
@@ -348,12 +388,20 @@ impl eframe::App for App {
         self.console_panel(ui);
         egui::Panel::left("planner").show(ui, |ui| self.planner_panel(ui));
         egui::CentralPanel::default().show(ui, |ui| self.plot(ui));
-        ui.ctx().request_repaint_after(Duration::from_millis(200));
     }
 
     fn on_exit(&mut self) {
-        self.remember_plan();
+        self.remember_last();
     }
+}
+
+/// Redraws the window after `wait`, even if nothing else happens until then.
+fn wake_after(ctx: &egui::Context, wait: Duration) {
+    let ctx = ctx.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(wait);
+        ctx.request_repaint();
+    });
 }
 
 fn timestamp() -> String {
@@ -371,17 +419,10 @@ fn absolute(path: &Path) -> PathBuf {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
     let args = args::parse(std::env::args().skip(1))?;
-    let mut app = App::new();
-    if let Some(port) = args.port.or_else(files::load_port) {
-        app.connect(&port);
-    }
-    if let Some(Err(e)) = args.file.map(|f| app.open(Path::new(&f))) {
-        app.status = e;
-    }
     eframe::run_native(
         "spectraplot",
         eframe::NativeOptions::default(),
-        Box::new(|_cc| Ok(Box::new(app))),
+        Box::new(|cc| Ok(Box::new(App::start(cc.egui_ctx.clone(), args)))),
     )?;
     Ok(())
 }

@@ -84,7 +84,7 @@ impl fmt::Display for Problem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnknownGrating(id) => write!(f, "there is no grating {id}"),
-            Self::EmptyRange => write!(f, "start must be below end"),
+            Self::EmptyRange => write!(f, "start and end must differ"),
             Self::StepNotPositive => write!(f, "step must be positive"),
             Self::NotOneDecimal(field) => write!(f, "{field} must have exactly one decimal place"),
             Self::OutsideDrive => {
@@ -164,7 +164,7 @@ impl ScanPlan {
             }
             Some(_) => {}
         }
-        if self.start_nm >= self.end_nm {
+        if self.start_nm == self.end_nm {
             found.push(Problem::EmptyRange);
         }
         if self.step_nm <= 0.0 {
@@ -201,10 +201,24 @@ impl ScanPlan {
 
     /// Number of grating positions the scan visits, both ends included.
     pub fn steps(&self) -> usize {
-        if self.step_nm <= 0.0 || self.start_nm > self.end_nm {
+        if self.step_nm <= 0.0 {
             return 0;
         }
-        ((self.end_nm - self.start_nm) / self.step_nm).round() as usize + 1
+        ((self.end_nm - self.start_nm).abs() / self.step_nm).round() as usize + 1
+    }
+
+    /// True when the scan counts down from a higher to a lower wavelength.
+    pub fn is_reversed(&self) -> bool {
+        self.start_nm > self.end_nm
+    }
+
+    /// The same plan scanned the other way round.
+    pub fn reversed(&self) -> Self {
+        Self {
+            start_nm: self.end_nm,
+            end_nm: self.start_nm,
+            ..self.clone()
+        }
     }
 
     /// Time spent integrating, without the moves between steps.
@@ -283,6 +297,11 @@ impl ScanPlan {
         }
     }
 
+    /// The plan on the first line of `text` that holds one.
+    pub fn first_of(text: &str) -> Option<Self> {
+        text.lines().find_map(|line| Self::from_line(line.trim()))
+    }
+
     /// Reads back a line written by [`ScanPlan::to_line`].
     pub fn from_line(line: &str) -> Option<Self> {
         let (command, name) = line.split_once(" # ").unwrap_or((line, ""));
@@ -352,6 +371,7 @@ mod tests {
     fn problems() {
         let cases = [
             ("default", plan(|_| {}), vec![]),
+            ("reversed", plan(|_| {}).reversed(), vec![]),
             (
                 "unknown grating",
                 plan(|p| p.grating = 4),
@@ -421,7 +441,8 @@ mod tests {
             ("single position", plan(|p| p.end_nm = p.start_nm), 1),
             ("coarse", plan(|p| p.step_nm = 10.0), 6),
             ("zero step", plan(|p| p.step_nm = 0.0), 0),
-            ("reversed", plan(|p| p.end_nm = 600.0), 0),
+            ("reversed", plan(|p| p.end_nm = 600.0), 1001),
+            ("default reversed", plan(|_| {}).reversed(), 501),
         ];
         for (name, plan, want) in cases {
             assert_eq!(plan.steps(), want, "{name}");
@@ -588,6 +609,59 @@ mod tests {
         ];
         for (name, plan, want) in cases {
             assert_eq!(plan.integration_total(), want, "{name}");
+        }
+    }
+
+    #[test]
+    fn reversed() {
+        let cases = [
+            ("ascending", plan(|_| {}), false),
+            ("descending", plan(|_| {}).reversed(), true),
+            ("single position", plan(|p| p.end_nm = p.start_nm), false),
+        ];
+        for (name, plan, want) in cases {
+            assert_eq!(plan.is_reversed(), want, "{name}");
+        }
+        let original = plan(|p| p.name = "keep".into());
+        let flipped = original.reversed();
+        assert_eq!((flipped.start_nm, flipped.end_nm), (750.0, 700.0));
+        assert_eq!(flipped.name, "keep");
+        assert_eq!(flipped.reversed(), original);
+    }
+
+    #[test]
+    fn reversed_survives_command_and_header() {
+        let reversed = plan(|_| {}).reversed();
+        assert_eq!(reversed.to_command(), "2 750.0 700.0 0.1 750 100 SCAN");
+        assert_eq!(
+            ScanPlan::from_command(&reversed.to_command()),
+            Some(reversed.clone())
+        );
+        let header = "grating 2, 750.0..700.0 nm, step 0.1 nm, 750 V, 100 ms integration per step";
+        assert_eq!(ScanPlan::from_header(header), Some(reversed));
+    }
+
+    #[test]
+    fn first_of() {
+        let named = "2 700.0 750.0 0.1 750 100 SCAN # kept";
+        let cases = [
+            ("first line", format!("{named}\n"), Some("kept")),
+            (
+                "junk before",
+                format!("junk\n\n  {named}  \n"),
+                Some("kept"),
+            ),
+            (
+                "two plans",
+                format!("{named}\n3 400.0 500.0 1.0 750 100 SCAN\n"),
+                Some("kept"),
+            ),
+            ("none", "range-scan\n".to_string(), None),
+            ("empty", String::new(), None),
+        ];
+        for (name, text, want) in cases {
+            let got = ScanPlan::first_of(&text).map(|plan| plan.name);
+            assert_eq!(got.as_deref(), want, "{name}");
         }
     }
 }

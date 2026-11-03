@@ -1,14 +1,14 @@
-use std::io::{BufRead, BufReader, ErrorKind};
+use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
-use serialport::{SerialPort, SerialPortInfo, SerialPortType};
+use serialport::{ClearBuffer, SerialPort, SerialPortInfo, SerialPortType};
 use spectraplot::event::{self, Event};
 
 const BAUD: u32 = 115_200;
-const READ_TIMEOUT: Duration = Duration::from_secs(1);
+const IO_TIMEOUT: Duration = Duration::from_secs(1);
 const LINE_END: &str = "\r";
 
 /// One received line as a terminal would show it, and what it means.
@@ -18,44 +18,70 @@ pub struct Message {
     pub event: Event,
 }
 
-/// An open spectractrl port with its reader thread; dropping it stops the reader.
+/// An open spectractrl port. A reader thread turns incoming lines into messages,
+/// a writer thread owns the port and sends lines; the UI never touches the port,
+/// so a device that stops listening can never block it.
 pub struct Connection {
     pub path: String,
     pub messages: Receiver<Message>,
-    port: Box<dyn SerialPort>,
+    lines: Sender<String>,
     stop: Arc<AtomicBool>,
 }
 
 impl Connection {
-    /// Opens `path` and starts reading; DTR is raised where the port supports it,
-    /// as USB CDC devices only send once it is set.
-    pub fn open(path: &str) -> serialport::Result<Self> {
-        let mut port = serialport::new(path, BAUD).timeout(READ_TIMEOUT).open()?;
+    /// Opens `path` and starts both threads; DTR is raised where the port supports it,
+    /// as USB CDC devices only send once it is set. `wake` is called after every
+    /// message, so the UI can redraw right away instead of polling.
+    pub fn open(path: &str, wake: impl Fn() + Send + Sync + 'static) -> serialport::Result<Self> {
+        let mut port = serialport::new(path, BAUD).timeout(IO_TIMEOUT).open()?;
         if let Err(e) = port.write_data_terminal_ready(true) {
             eprintln!("cannot raise DTR on {path}: {e}");
         }
+        let (tx, messages) = mpsc::channel();
+        let outbox = Outbox {
+            tx,
+            wake: Arc::new(wake),
+        };
         let stop = Arc::new(AtomicBool::new(false));
         let reader = BufReader::new(port.try_clone()?);
-        let messages = spawn_reader(reader, Arc::clone(&stop));
+        spawn_reader(reader, Arc::clone(&stop), outbox.clone());
+        let lines = spawn_writer(port, outbox);
         Ok(Self {
             path: path.to_string(),
             messages,
-            port,
+            lines,
             stop,
         })
     }
 
-    /// Sends one command line, terminated the way the REPL expects.
-    pub fn send_line(&mut self, line: &str) -> std::io::Result<()> {
-        self.port.write_all(line.as_bytes())?;
-        self.port.write_all(LINE_END.as_bytes())?;
-        self.port.flush()
+    /// Queues one command line; a failure to send comes back as a message.
+    pub fn send_line(&self, line: &str) {
+        self.lines.send(line.to_string()).ok();
     }
 }
 
 impl Drop for Connection {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Where both threads deliver their messages, waking the UI each time.
+#[derive(Clone)]
+struct Outbox {
+    tx: Sender<Message>,
+    wake: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl Outbox {
+    fn send(&self, message: Message) -> bool {
+        let sent = self.tx.send(message).is_ok();
+        (self.wake)();
+        sent
+    }
+
+    fn report(&self, text: String, event: Event) {
+        self.send(Message { text, event });
     }
 }
 
@@ -107,39 +133,56 @@ fn label(info: &SerialPortInfo) -> String {
     }
 }
 
-fn spawn_reader(input: impl BufRead + Send + 'static, stop: Arc<AtomicBool>) -> Receiver<Message> {
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || read_events(input, &tx, &stop));
-    rx
+fn spawn_reader(input: impl BufRead + Send + 'static, stop: Arc<AtomicBool>, outbox: Outbox) {
+    std::thread::spawn(move || read_events(input, &outbox, &stop));
 }
 
-fn read_events(mut input: impl BufRead, tx: &Sender<Message>, stop: &AtomicBool) {
+fn read_events(mut input: impl BufRead, outbox: &Outbox, stop: &AtomicBool) {
     let mut line = String::new();
     while !stop.load(Ordering::Relaxed) {
         match input.read_line(&mut line) {
-            Ok(0) => return report(tx, "device closed the connection".into()),
+            Ok(0) => return disconnected(outbox, "device closed the connection".into()),
             Ok(_) => {
                 let text = event::clean(&line);
                 line.clear();
                 if let Some(event) = Event::parse(&text)
-                    && tx.send(Message { text, event }).is_err()
+                    && !outbox.send(Message { text, event })
                 {
                     return;
                 }
             }
             Err(e) if e.kind() == ErrorKind::TimedOut => continue,
-            Err(e) => return report(tx, format!("read failed: {e}")),
+            Err(e) => return disconnected(outbox, format!("read failed: {e}")),
         }
     }
 }
 
-fn report(tx: &Sender<Message>, reason: String) {
-    let event = Event::Disconnected(reason.clone());
-    tx.send(Message {
-        text: reason,
-        event,
-    })
-    .ok();
+fn disconnected(outbox: &Outbox, reason: String) {
+    outbox.report(reason.clone(), Event::Disconnected(reason));
+}
+
+/// Sends queued lines until the connection is dropped, then discards whatever the
+/// device has not taken yet: closing a tty with pending output waits for it to drain.
+fn spawn_writer(mut port: Box<dyn SerialPort>, outbox: Outbox) -> Sender<String> {
+    let (tx, rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in rx {
+            if let Err(e) = write_line(&mut port, &line) {
+                let text = format!("send failed, device not listening? {e}");
+                outbox.report(text.clone(), Event::Other(text));
+            }
+        }
+        if let Err(e) = port.clear(ClearBuffer::All) {
+            eprintln!("cannot discard pending output: {e}");
+        }
+    });
+    tx
+}
+
+/// Writes one line with the REPL's line end; deliberately no flush, which would
+/// wait without limit for a device that does not read.
+fn write_line(out: &mut impl Write, line: &str) -> std::io::Result<()> {
+    out.write_all(format!("{line}{LINE_END}").as_bytes())
 }
 
 #[cfg(test)]
@@ -156,13 +199,25 @@ mod tests {
         }
     }
 
+    fn read_all(input: &str) -> (Vec<Message>, usize) {
+        let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&wakes);
+        let (tx, rx) = mpsc::channel();
+        let outbox = Outbox {
+            tx,
+            wake: Arc::new(move || {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }),
+        };
+        let stop = AtomicBool::new(false);
+        read_events(Cursor::new(input.to_string()), &outbox, &stop);
+        drop(outbox);
+        (rx.iter().collect(), wakes.load(Ordering::Relaxed))
+    }
+
     #[test]
     fn reader_forwards_messages_until_eof() {
         let input = "scan started\n\n> \r\x1b[K[scan:out] 700.0,1441\r\n[scan:done] 1 steps\n";
-        let stop = Arc::new(AtomicBool::new(false));
-        let messages: Vec<Message> = spawn_reader(Cursor::new(input.to_string()), stop)
-            .iter()
-            .collect();
         let want = vec![
             message("scan started", Event::Other("scan started".into())),
             message(
@@ -178,16 +233,29 @@ mod tests {
                 Event::Disconnected("device closed the connection".into()),
             ),
         ];
+        let (messages, wakes) = read_all(input);
         assert_eq!(messages, want);
+        assert_eq!(wakes, want.len());
     }
 
     #[test]
     fn reader_stops_when_asked() {
-        let stop = Arc::new(AtomicBool::new(true));
-        let messages: Vec<Message> = spawn_reader(Cursor::new("700.0,1\n".to_string()), stop)
-            .iter()
-            .collect();
-        assert_eq!(messages, vec![]);
+        let (tx, rx) = mpsc::channel();
+        let outbox = Outbox {
+            tx,
+            wake: Arc::new(|| {}),
+        };
+        let stop = AtomicBool::new(true);
+        read_events(Cursor::new("700.0,1\n".to_string()), &outbox, &stop);
+        drop(outbox);
+        assert_eq!(rx.iter().count(), 0);
+    }
+
+    #[test]
+    fn write_line_appends_line_end() {
+        let mut out = Vec::new();
+        write_line(&mut out, "abort scan").expect("write to vec");
+        assert_eq!(out, b"abort scan\r");
     }
 
     fn usb(manufacturer: Option<&str>, product: Option<&str>) -> SerialPortType {

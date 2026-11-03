@@ -16,8 +16,9 @@ R928 PMT ──────── PS-445 ───────┘
 - **Scan planner** with grating, range, step, PMT voltage and integration time,
   validated before anything is sent: one decimal for wavelengths, drive and
   grating limits, PMT range
-- **Presets and history**: name settings you use often, the last 20 settings are
-  always one click away, and the planner opens with the last one
+- **Presets**: name settings you use often and save them on request, names are
+  unique; the planner always opens with the settings used last
+- **Scans in both directions**: a start above the end scans downward
 - **Live plot** with every reading and the mean per step, an x axis fixed to the
   planned range, and a cursor read-out of wavelength and value
 - **Quake-style console** (F12) showing everything the device sends, with a
@@ -58,10 +59,13 @@ spectraplot [--port DEVICE] [FILE]
 
 | field              | meaning                                                         |
 |--------------------|-----------------------------------------------------------------|
-| settings…          | presets by name, then recently used settings                    |
-| name               | optional; names a preset and the suggested file name            |
+| presets…           | the presets you saved; a click loads one                        |
+| name               | optional; names the suggested file name and, saved, a preset    |
+| save preset        | stores the settings under the name; saving a name again updates it |
+| delete preset      | forgets the preset with the name in the field                   |
+| swap start/end     | reverses the scan                                               |
 | grating            | see the table below                                             |
-| start / end / step | nm with exactly one decimal                                     |
+| start / end / step | nm with exactly one decimal; a start above the end scans downward |
 | HV                 | PMT voltage, 0–1000 V                                           |
 | integration        | PMT integration time per step, 1–60 000 ms                      |
 
@@ -117,7 +121,7 @@ State lives in `$XDG_STATE_HOME/spectraplot` (usually `~/.local/state/spectraplo
 | file      | content                                     |
 |-----------|---------------------------------------------|
 | `recent`  | recently opened files, one path per line    |
-| `plans`   | recently used settings, one command per line |
+| `last`    | the settings used last, one command line     |
 | `presets` | named settings, `<command> # <name>`        |
 | `port`    | the serial port to reconnect to             |
 
@@ -166,7 +170,7 @@ lib/   spectraplot      device-independent logic, fully unit tested
   event.rs              classifies device lines
   sample.rs scan.rs     readings and recorded scans, .dat and .csv
   plan.rs presets.rs    scan settings, validation, command and header format
-  history.rs            most-recently-used lists
+  history.rs            most-recently-used list, used for recent files
   svg.rs                plot export
 gui/   spectraplot-gui  the egui application, binary `spectraplot`
   main.rs               app state and wiring
