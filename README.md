@@ -117,13 +117,39 @@ Right-click the status line or the command line to copy them; help pages have a
 
 | file   | content                                                          |
 |--------|------------------------------------------------------------------|
-| `.dat` | native format: `# <header>` from the device, then `nm,reading,…` |
+| `.spectra` | native format: `# <header>` from the device, `#> ` notes, `#@ <nm> <comment>` marks, then `nm,reading,…` |
+| `.dat` | the same text under the old name; still opens and saves         |
 | `.csv` | export with column names: `nm,read1,…,mean`                      |
 | `.svg` | export of the mean as a plot                                     |
 
 New scans suggest `<name>_<YYYYmmdd-HHMMSS>` or, unnamed,
 `<start>-<end>_<step>_<volts>_<ms>_<YYYYmmdd-HHMMSS>`. The `.dat` format is
 plain text and plots directly with gnuplot (`set datafile separator ","`).
+
+### Notes and marks
+
+F2 (or View › Notes and marks) opens a panel under the plot. The notes field takes
+free text of any length: setup, goals, remarks. Notes typed before a scan starts
+go into that scan. Double-click near a point in the plot to mark it: a speech bubble appears at the
+point and takes the comment right there. A ring on the plot shows which point a
+double-click would mark. Double-click a bubble to edit it again, drag it to move the
+mark to another point, right-click it to remove the mark. Notes and marks
+are saved in the file as `#>` and `#@` comment lines, so gnuplot and other tools
+skip them. CSV and SVG exports do not contain them.
+
+### Opening files from the desktop
+
+`packaging/` holds a MIME type for `*.spectra` and a desktop entry. For the current user:
+
+    install -Dm644 packaging/spectraplot-scan.xml ~/.local/share/mime/packages/spectraplot-scan.xml
+    install -Dm644 packaging/spectraplot.desktop ~/.local/share/applications/spectraplot.desktop
+    update-mime-database ~/.local/share/mime
+    xdg-mime default spectraplot.desktop application/x-spectraplot-scan
+
+`xdg-open scan.spectra` then starts `spectraplot scan.spectra`. The binary must be
+in `PATH` (`cargo install --path gui`). Under home-manager, `xdg.mimeApps` owns
+`mimeapps.list`; set `xdg.mimeApps.defaultApplications."application/x-spectraplot-scan" = "spectraplot.desktop"`
+there instead of calling `xdg-mime`.
 
 State lives in `$XDG_STATE_HOME/spectraplot` (usually `~/.local/state/spectraplot`):
 

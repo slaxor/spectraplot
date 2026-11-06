@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=spectraplot
+Comment=Plan, run and plot monochromator scans
+Exec=spectraplot %f
+Terminal=false
+Categories=Science;Education;
+MimeType=application/x-spectraplot-scan;

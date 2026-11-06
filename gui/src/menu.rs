@@ -11,6 +11,7 @@ pub enum Action {
     Connect(String),
     Disconnect,
     ToggleConsole,
+    ToggleNotes,
     CopyData,
     CopyCommand,
     Help(&'static str),
@@ -35,6 +36,7 @@ pub fn bar(
     connected: Option<&str>,
     scanning: bool,
     console_open: bool,
+    notes_open: bool,
     has_data: bool,
 ) -> Option<Action> {
     let mut action = None;
@@ -48,6 +50,10 @@ pub fn bar(
             let console = egui::Button::selectable(console_open, "Console  F12");
             if ui.add(console).clicked() {
                 action = Some(Action::ToggleConsole);
+            }
+            let notes = egui::Button::selectable(notes_open, "Notes and marks  F2");
+            if ui.add(notes).clicked() {
+                action = Some(Action::ToggleNotes);
             }
         });
         ui.menu_button("Help", |ui| action = help_entries(ui));

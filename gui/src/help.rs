@@ -126,8 +126,12 @@ pub const SECTIONS: &[Section] = &[
         body: &[
             Block::Table(&[
                 (
+                    ".spectra",
+                    "native format: a # header line, #> notes, #@ marks, then nm,reading,… per step",
+                ),
+                (
                     ".dat",
-                    "native format: a # header line, then nm,reading,… per step",
+                    "the same text under the old name; still opens and saves",
                 ),
                 (
                     ".csv",
@@ -138,6 +142,14 @@ pub const SECTIONS: &[Section] = &[
             Block::Text(
                 "Open also reads raw tio logs. Save and Export reuse the last file name; \
                  the As… entries always ask. New scans suggest <name or parameters>_<time>.",
+            ),
+            Block::Text(
+                "Notes (F2) describe setup and goals and can be as long as you like. A mark \
+                 comments one measurement point: double-click near the point in the plot and \
+                 type into the bubble that appears. A ring shows which point a \
+                 double-click would mark. Double-click a bubble to edit it later, drag it to \
+                 move the mark to another point, right-click it to remove the mark. Both are saved in the file as comment lines, so gnuplot and other \
+                 tools skip them.",
             ),
             Block::Text("Settings live in ~/.local/state/spectraplot:"),
             Block::Table(&[
@@ -153,6 +165,14 @@ pub const SECTIONS: &[Section] = &[
         body: &[Block::Table(&[
             ("F1", "this help"),
             ("F12", "console"),
+            ("F2", "notes and marks"),
+            (
+                "double-click in the plot",
+                "mark the nearest point and type its comment",
+            ),
+            ("double-click a bubble", "edit its text in place"),
+            ("drag a bubble", "move the mark to another point"),
+            ("right-click a bubble", "remove the mark"),
             ("Enter", "send the console line"),
             ("Up / Down", "console history"),
             ("Ctrl+C / V / X", "copy, paste, cut in text fields"),

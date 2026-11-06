@@ -1,10 +1,22 @@
 use crate::event::Event;
 use crate::sample::Sample;
 
-/// A recorded scan: the device's description line and its samples.
+const NOTE_PREFIX: &str = "#>";
+const MARK_PREFIX: &str = "#@";
+
+/// A comment on one measurement point, found by its wavelength.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Mark {
+    pub nm: f64,
+    pub text: String,
+}
+
+/// A recorded scan: the device's description line, free notes, marks and samples.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Scan {
     pub header: Option<String>,
+    pub notes: String,
+    pub marks: Vec<Mark>,
     pub samples: Vec<Sample>,
 }
 
@@ -12,10 +24,61 @@ impl Scan {
     /// Reads a `.dat` file or a raw device log; unrecognised lines are skipped.
     pub fn parse(text: &str) -> Self {
         let mut scan = Self::default();
-        for event in text.lines().filter_map(Event::parse) {
-            scan.apply(event);
+        let mut notes = Vec::new();
+        for line in text.lines() {
+            if let Some(note) = line.strip_prefix(NOTE_PREFIX) {
+                notes.push(note.strip_prefix(' ').unwrap_or(note));
+            } else if let Some(mark) = line.strip_prefix(MARK_PREFIX) {
+                scan.parse_mark(mark);
+            } else if let Some(event) = Event::parse(line) {
+                scan.apply(event);
+            }
         }
+        scan.notes = notes.join("\n");
         scan
+    }
+
+    fn parse_mark(&mut self, text: &str) {
+        let (nm, text) = text
+            .trim_start()
+            .split_once(' ')
+            .unwrap_or((text.trim(), ""));
+        if let Ok(nm) = nm.parse() {
+            self.set_mark(nm, text);
+        }
+    }
+
+    /// The wavelength of the sample closest to `nm`.
+    pub fn nearest_nm(&self, nm: f64) -> Option<f64> {
+        let distance = |s: &&Sample| (s.nm - nm).abs();
+        let nearest = self
+            .samples
+            .iter()
+            .min_by(|a, b| distance(a).total_cmp(&distance(b)));
+        nearest.map(|s| s.nm)
+    }
+
+    /// Keeps the marks ordered by wavelength, as `set_mark` does.
+    pub fn sort_marks(&mut self) {
+        self.marks.sort_by(|a, b| a.nm.total_cmp(&b.nm));
+    }
+
+    /// Index of the mark at `nm`, if there is one.
+    pub fn mark_index(&self, nm: f64) -> Option<usize> {
+        self.marks.iter().position(|m| (m.nm - nm).abs() < 1e-6)
+    }
+
+    /// Sets the comment on the point at `nm`, adding the mark if needed; marks stay sorted.
+    /// Line breaks become spaces, as a mark is a single line in the file.
+    pub fn set_mark(&mut self, nm: f64, text: &str) {
+        let text = text.replace(['\r', '\n'], " ");
+        match self.mark_index(nm) {
+            Some(index) => self.marks[index].text = text,
+            None => {
+                self.marks.push(Mark { nm, text });
+                self.sort_marks();
+            }
+        }
     }
 
     /// Takes over a header or sample; returns true if the scan changed.
@@ -28,11 +91,20 @@ impl Scan {
         true
     }
 
-    /// The native file format: `# header` followed by `nm,read,...` rows.
+    /// The native file format: `# header`, notes as `#> line`, marks as `#@ nm text`,
+    /// then `nm,read,...` rows. All of it but the rows is a comment to other tools.
     pub fn to_dat(&self) -> String {
         let header = self.header.iter().map(|h| format!("# {h}"));
+        let notes = self
+            .notes
+            .lines()
+            .map(|n| format!("{NOTE_PREFIX} {n}").trim_end().to_string());
+        let marks = self
+            .marks
+            .iter()
+            .map(|m| format!("{MARK_PREFIX} {} {}", m.nm, m.text));
         let rows = self.samples.iter().map(Sample::to_csv);
-        lines(header.chain(rows))
+        lines(header.chain(notes).chain(marks).chain(rows))
     }
 
     /// A plain table for other tools: column names, reads and their mean.
@@ -86,6 +158,7 @@ mod tests {
                     reads: vec![3475],
                 },
             ],
+            ..Scan::default()
         }
     }
 
@@ -104,6 +177,7 @@ mod tests {
                         nm: 535.0,
                         reads: vec![4674],
                     }],
+                    ..Scan::default()
                 },
             ),
             ("empty", "", Scan::default()),
@@ -153,6 +227,7 @@ mod tests {
                 nm: 700.0,
                 reads: vec![1, 2, 6],
             }],
+            ..Scan::default()
         };
         let cases = [
             (
@@ -180,6 +255,7 @@ mod tests {
                 nm: 700.0,
                 reads: vec![1, 2, 6],
             }],
+            ..Scan::default()
         };
         let cases = [
             (
@@ -197,5 +273,79 @@ mod tests {
         for (name, scan, want) in cases {
             assert_eq!(scan.to_tsv(), want, "{name}");
         }
+    }
+
+    fn annotated() -> Scan {
+        Scan {
+            notes: "Ne lamp, fine step\n\nsecond paragraph".into(),
+            marks: vec![
+                Mark {
+                    nm: 535.0,
+                    text: "start of the line".into(),
+                },
+                Mark {
+                    nm: 535.1,
+                    text: String::new(),
+                },
+            ],
+            ..scan()
+        }
+    }
+
+    #[test]
+    fn annotations_survive_the_file() {
+        let text = annotated().to_dat();
+        assert_eq!(
+            text,
+            "# grating 3, 535.0..545.0 nm\n#> Ne lamp, fine step\n#>\n#> second paragraph\n\
+             #@ 535 start of the line\n#@ 535.1 \n535,4674\n535.1,3475\n"
+        );
+        assert_eq!(Scan::parse(&text), annotated());
+    }
+
+    #[test]
+    fn annotations_do_not_disturb_other_readers() {
+        let events = annotated().to_dat();
+        let header_lines = events.lines().filter(|l| l.starts_with("# ")).count();
+        assert_eq!(header_lines, 1);
+        assert_eq!(Scan::parse(DAT), scan());
+    }
+
+    #[test]
+    fn set_mark() {
+        let cases = [
+            (
+                "adds sorted",
+                vec![(536.0, "b"), (535.0, "a")],
+                vec![(535.0, "a"), (536.0, "b")],
+            ),
+            (
+                "replaces",
+                vec![(535.0, "a"), (535.0, "c")],
+                vec![(535.0, "c")],
+            ),
+            ("one line", vec![(535.0, "a\nb")], vec![(535.0, "a b")]),
+        ];
+        for (name, calls, want) in cases {
+            let mut scan = Scan::default();
+            for (nm, text) in calls {
+                scan.set_mark(nm, text);
+            }
+            let got: Vec<_> = scan.marks.iter().map(|m| (m.nm, m.text.as_str())).collect();
+            assert_eq!(got, want, "{name}");
+        }
+    }
+
+    #[test]
+    fn nearest_nm() {
+        let cases = [
+            ("between, closer to the first", 535.04, Some(535.0)),
+            ("between, closer to the second", 535.06, Some(535.1)),
+            ("beyond the end", 900.0, Some(535.1)),
+        ];
+        for (name, nm, want) in cases {
+            assert_eq!(scan().nearest_nm(nm), want, "{name}");
+        }
+        assert_eq!(Scan::default().nearest_nm(1.0), None);
     }
 }

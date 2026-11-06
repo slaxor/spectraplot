@@ -8,6 +8,7 @@ use spectraplot::presets::Presets;
 use spectraplot::scan::Scan;
 use spectraplot::svg;
 
+const SPECTRA: &str = "spectra";
 const DAT: &str = "dat";
 const CSV: &str = "csv";
 const SVG: &str = "svg";
@@ -18,12 +19,12 @@ const LEGACY_PLANS: &str = "plans";
 const PRESETS: &str = "presets";
 const PORT: &str = "port";
 
-/// Loads a `.dat` file or a raw device log.
+/// Loads a `.spectra` or `.dat` file or a raw device log.
 pub fn open(path: &Path) -> io::Result<Scan> {
     fs::read_to_string(path).map(|text| Scan::parse(&text))
 }
 
-/// Writes the scan in the native `.dat` format.
+/// Writes the scan in the native format.
 pub fn save(path: &Path, scan: &Scan) -> io::Result<()> {
     fs::write(path, scan.to_dat())
 }
@@ -46,16 +47,16 @@ pub fn export(path: &Path, scan: &Scan) -> io::Result<()> {
 /// Asks for a file to open.
 pub fn pick_open() -> Option<PathBuf> {
     rfd::FileDialog::new()
-        .add_filter("scans", &[DAT, CSV, "log", "txt"])
+        .add_filter("scans", &[SPECTRA, DAT, CSV, "log", "txt"])
         .add_filter("all files", &["*"])
         .pick_file()
 }
 
-/// Asks where to save, suggesting `stem.dat`.
+/// Asks where to save, suggesting `stem.spectra`; `.dat` holds the same text.
 pub fn pick_save(stem: &str) -> Option<PathBuf> {
     rfd::FileDialog::new()
-        .add_filter("scan", &[DAT])
-        .set_file_name(format!("{stem}.{DAT}"))
+        .add_filter("scan", &[SPECTRA, DAT])
+        .set_file_name(format!("{stem}.{SPECTRA}"))
         .save_file()
 }
 
@@ -160,6 +161,7 @@ mod tests {
                 nm: 540.0,
                 reads: vec![39560],
             }],
+            ..Scan::default()
         }
     }
 

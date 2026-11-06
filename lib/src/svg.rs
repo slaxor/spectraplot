@@ -97,6 +97,7 @@ mod tests {
         Scan {
             header: header.map(Into::into),
             samples,
+            ..Scan::default()
         }
     }
 

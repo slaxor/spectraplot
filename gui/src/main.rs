@@ -1,4 +1,5 @@
 mod args;
+mod bubble;
 mod clipboard;
 mod console;
 mod device;
@@ -6,6 +7,7 @@ mod document;
 mod files;
 mod help;
 mod menu;
+mod notes;
 mod planner;
 
 use std::io;
@@ -13,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use egui_plot::{HoverPosition, Line, Plot, PlotPoints, Points};
+use egui_plot::{HoverPosition, Line, LineStyle, Plot, PlotPoint, PlotPoints, Points, VLine};
 use spectraplot::event::Event;
 use spectraplot::history::History;
 use spectraplot::plan::ScanPlan;
@@ -24,6 +26,7 @@ use device::Connection;
 use document::Document;
 use help::Help;
 use menu::{Action, FileAction};
+use notes::Notes;
 use planner::{Planner, PlannerAction};
 
 fn cursor_label(hover: &HoverPosition<'_>) -> Option<String> {
@@ -48,6 +51,11 @@ struct App {
     scanning: bool,
     abort_deadline: Option<Instant>,
     retry: Option<Retry>,
+    notes: Notes,
+    editing: Option<usize>,
+    focus_editor: bool,
+    over_bubble: bool,
+    grab: egui::Vec2,
     status: String,
 }
 
@@ -66,6 +74,11 @@ impl App {
             scanning: false,
             abort_deadline: None,
             retry: None,
+            notes: Notes::default(),
+            editing: None,
+            focus_editor: false,
+            over_bubble: false,
+            grab: egui::Vec2::ZERO,
             status: "not connected, pick a port in the Port menu".into(),
         }
     }
@@ -103,10 +116,23 @@ impl App {
         };
         let plan = &self.planner.plan;
         connection.send_line(&plan.to_command());
-        self.doc = Document::for_scan(format!("{}_{}", plan.file_stem(), timestamp()));
+        let stem = format!("{}_{}", plan.file_stem(), timestamp());
+        let notes = self.notes_for_next_scan();
+        self.doc = Document::for_scan(stem);
+        self.doc.scan.notes = notes;
+        self.editing = None;
         self.scanning = true;
         self.abort_deadline = None;
         self.remember_last();
+    }
+
+    /// Notes written before the scan started belong to it; those of a finished scan do not.
+    fn notes_for_next_scan(&mut self) -> String {
+        if self.doc.scan.samples.is_empty() {
+            std::mem::take(&mut self.doc.scan.notes)
+        } else {
+            String::new()
+        }
     }
 
     fn send_command(&mut self, command: &str) {
@@ -146,6 +172,7 @@ impl App {
             Action::Connect(path) => self.connect(&path),
             Action::Disconnect => self.disconnect(),
             Action::ToggleConsole => self.console.toggle(),
+            Action::ToggleNotes => self.notes.open = !self.notes.open,
             Action::CopyData => self.copy_data(),
             Action::CopyCommand => {
                 self.copy_to_clipboard(self.planner.plan.to_command(), "command")
@@ -269,7 +296,9 @@ impl App {
 
     fn open(&mut self, path: &Path) -> Result<(), String> {
         self.doc = Document::open(path).map_err(|e| failed("open", path, &e))?;
+        self.editing = None;
         self.remember(path);
+        self.notes.open |= !self.doc.scan.notes.is_empty();
         if let Some(plan) = self
             .doc
             .scan
@@ -362,6 +391,18 @@ impl App {
         }
     }
 
+    fn notes_panel(&mut self, ui: &mut egui::Ui) {
+        let mut open = self.notes.open;
+        let changed = egui::Panel::bottom("notes")
+            .resizable(true)
+            .default_size(180.0)
+            .drag_to_open(false)
+            .show_collapsible(ui, &mut open, |ui| self.notes.show(ui, &mut self.doc.scan))
+            .is_some_and(|response| response.inner);
+        self.notes.open = open;
+        self.doc.dirty |= changed;
+    }
+
     fn planner_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading(self.doc.title());
         ui.separator();
@@ -376,18 +417,188 @@ impl App {
         clipboard::copy_menu(&status, "copy message", &self.status);
     }
 
-    fn plot(&self, ui: &mut egui::Ui) {
+    /// The wavelength of the sample that lies closest to `position` on screen.
+    fn nearest_on_screen(
+        &self,
+        shown: &egui_plot::PlotResponse<()>,
+        position: egui::Pos2,
+    ) -> Option<f64> {
+        let distance = |s: &&spectraplot::sample::Sample| {
+            let at = shown
+                .transform
+                .position_from_point(&PlotPoint::new(s.nm, s.mean()));
+            at.distance_sq(position)
+        };
+        let samples = self.doc.scan.samples.iter();
+        samples
+            .min_by(|a, b| distance(a).total_cmp(&distance(b)))
+            .map(|s| s.nm)
+    }
+
+    fn mark_near(&mut self, nearest: Option<f64>) {
+        let Some(nearest) = nearest else {
+            self.status = "no data to mark yet".into();
+            return;
+        };
+        if self.doc.scan.mark_index(nearest).is_none() {
+            self.doc.scan.set_mark(nearest, "");
+            self.doc.dirty = true;
+        }
+        self.editing = self.doc.scan.mark_index(nearest);
+        self.focus_editor = true;
+    }
+
+    fn marks_in_plot(&self, plot: &mut egui_plot::PlotUi<'_>) {
+        let color = egui::Color32::from_rgb(230, 160, 40);
+        for mark in &self.doc.scan.marks {
+            plot.vline(
+                VLine::new("mark", mark.nm)
+                    .style(LineStyle::dashed_dense())
+                    .color(color),
+            );
+            let Some(sample) = self.doc.scan.samples.iter().find(|s| s.nm == mark.nm) else {
+                continue;
+            };
+            let at = [sample.nm, sample.mean()];
+            plot.points(Points::new("mark", at).radius(4.0).color(color));
+        }
+    }
+
+    /// Moves a mark to `target`, unless another mark sits there already.
+    fn move_mark(&mut self, index: usize, target: Option<f64>) {
+        let Some(target) = target else {
+            return;
+        };
+        if self.doc.scan.mark_index(target).is_none() {
+            self.doc.scan.marks[index].nm = target;
+            self.doc.dirty = true;
+        }
+    }
+
+    /// A ring on the point a double-click would mark.
+    fn preview_target(&self, painter: &egui::Painter, shown: &egui_plot::PlotResponse<()>) {
+        let Some(position) = shown.response.hover_pos() else {
+            return;
+        };
+        let Some(nm) = self.nearest_on_screen(shown, position) else {
+            return;
+        };
+        let Some(sample) = self.doc.scan.samples.iter().find(|s| s.nm == nm) else {
+            return;
+        };
+        let at = shown
+            .transform
+            .position_from_point(&PlotPoint::new(nm, sample.mean()));
+        let color = egui::Color32::from_rgb(230, 160, 40);
+        painter.circle_stroke(at, 7.0, egui::Stroke::new(1.5, color));
+    }
+
+    /// Drawn after the plot, so the bubbles lie over the curve. Double-click a bubble to
+    /// edit its text in place, right-click it to remove the mark.
+    fn bubbles(&mut self, ui: &mut egui::Ui, shown: &egui_plot::PlotResponse<()>) {
+        let painter = ui.painter().with_clip_rect(shown.response.rect);
+        let mut finished = false;
+        let mut removed = None;
+        let mut started = None;
+        let mut over = egui::Popup::is_any_open(ui.ctx());
+        let mut moved = None;
+        let mut dropped = false;
+        for index in 0..self.doc.scan.marks.len() {
+            let mark = &mut self.doc.scan.marks[index];
+            let Some(sample) = self.doc.scan.samples.iter().find(|s| s.nm == mark.nm) else {
+                continue;
+            };
+            let tip = shown
+                .transform
+                .position_from_point(&PlotPoint::new(sample.nm, sample.mean()));
+            if self.editing == Some(index) {
+                let body = bubble::draw(&painter, tip, &mark.text, true);
+                let field = egui::TextEdit::singleline(&mut mark.text)
+                    .frame(egui::Frame::NONE)
+                    .text_color(bubble::ink())
+                    .desired_width(body.width() - bubble::PADDING.x * 2.0);
+                let response = ui.put(body.shrink2(bubble::PADDING), field);
+                if std::mem::take(&mut self.focus_editor) {
+                    response.request_focus();
+                }
+                self.doc.dirty |= response.changed();
+                finished |= response.lost_focus();
+                continue;
+            }
+            let text = match mark.text.is_empty() {
+                true => format!("{:.1} nm", mark.nm),
+                false => mark.text.clone(),
+            };
+            let body = bubble::draw(&painter, tip, &text, false);
+            let id = egui::Id::new(("bubble", index));
+            let response = ui.interact(body, id, egui::Sense::click_and_drag());
+            let response = response.on_hover_cursor(egui::CursorIcon::Grab);
+            over |= response.hovered();
+            let pointer = response.interact_pointer_pos();
+            if response.drag_started() {
+                self.grab = pointer.map_or(egui::Vec2::ZERO, |p| p - tip);
+            }
+            if response.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                moved = pointer.map(|p| (index, p - self.grab));
+            }
+            dropped |= response.drag_stopped();
+            if response.double_clicked() {
+                started = Some(index);
+            }
+            response.context_menu(|ui| {
+                if ui.button("remove mark").clicked() {
+                    removed = Some(index);
+                    ui.close();
+                }
+            });
+        }
+        self.over_bubble = over;
+        if let Some((index, position)) = moved {
+            let nearest = self.nearest_on_screen(shown, position);
+            self.move_mark(index, nearest);
+        }
+        if dropped {
+            self.doc.scan.sort_marks();
+        }
+        if !over {
+            self.preview_target(&painter, shown);
+        }
+        if finished {
+            self.editing = None;
+        }
+        if let Some(index) = removed {
+            self.doc.scan.marks.remove(index);
+            self.editing = None;
+            self.doc.dirty = true;
+        }
+        if started.is_some() {
+            self.editing = started;
+            self.focus_editor = true;
+        }
+    }
+
+    fn plot(&mut self, ui: &mut egui::Ui) {
         let plan = &self.planner.plan;
-        Plot::new("scan")
+        let shown = Plot::new("scan")
             .include_x(plan.start_nm)
             .include_x(plan.end_nm)
+            .allow_double_click_reset(false)
+            .show_x(!self.over_bubble)
+            .show_y(!self.over_bubble)
             .x_axis_label("nm")
             .y_axis_label("PMT")
             .label_formatter(cursor_label)
             .show(ui, |plot| {
                 plot.points(Points::new("reads", self.read_points()).radius(1.5));
                 plot.line(Line::new("mean", self.mean_points()));
+                self.marks_in_plot(plot);
             });
+        self.bubbles(ui, &shown);
+        let response = &shown.response;
+        if let Some(position) = response.hover_pos().filter(|_| response.double_clicked()) {
+            self.mark_near(self.nearest_on_screen(&shown, position));
+        }
     }
 
     fn mean_points(&self) -> PlotPoints<'static> {
@@ -439,6 +650,7 @@ impl eframe::App for App {
                     connected,
                     self.scanning,
                     self.console.open,
+                    self.notes.open,
                     !self.doc.scan.samples.is_empty(),
                 )
             })
@@ -452,8 +664,12 @@ impl eframe::App for App {
         if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F1)) {
             self.help.open_at("Getting started");
         }
+        if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F2)) {
+            self.notes.open = !self.notes.open;
+        }
         self.help.show(ui.ctx());
         self.console_panel(ui);
+        self.notes_panel(ui);
         egui::Panel::left("planner").show(ui, |ui| self.planner_panel(ui));
         egui::CentralPanel::default().show(ui, |ui| self.plot(ui));
     }
