@@ -1,4 +1,5 @@
 mod args;
+mod clipboard;
 mod console;
 mod device;
 mod document;
@@ -33,6 +34,7 @@ fn cursor_label(hover: &HoverPosition<'_>) -> Option<String> {
 
 /// How long after the current step's integration an abort may take to be confirmed.
 const ABORT_MARGIN: Duration = Duration::from_secs(5);
+const RETRY_EVERY: Duration = Duration::from_secs(2);
 
 struct App {
     ctx: egui::Context,
@@ -45,6 +47,7 @@ struct App {
     presets: Presets,
     scanning: bool,
     abort_deadline: Option<Instant>,
+    retry: Option<Retry>,
     status: String,
 }
 
@@ -62,6 +65,7 @@ impl App {
             presets: files::load_presets(),
             scanning: false,
             abort_deadline: None,
+            retry: None,
             status: "not connected, pick a port in the Port menu".into(),
         }
     }
@@ -142,9 +146,23 @@ impl App {
             Action::Connect(path) => self.connect(&path),
             Action::Disconnect => self.disconnect(),
             Action::ToggleConsole => self.console.toggle(),
+            Action::CopyData => self.copy_data(),
+            Action::CopyCommand => {
+                self.copy_to_clipboard(self.planner.plan.to_command(), "command")
+            }
             Action::Help(title) => self.help.open_at(title),
             Action::DeviceHelp => self.device_help(),
         }
+    }
+
+    fn copy_to_clipboard(&mut self, text: String, what: &str) {
+        self.ctx.copy_text(text);
+        self.status = format!("copied {what}");
+    }
+
+    fn copy_data(&mut self) {
+        let rows = self.doc.scan.samples.len();
+        self.copy_to_clipboard(self.doc.scan.to_tsv(), &format!("{rows} rows"));
     }
 
     fn device_help(&mut self) {
@@ -158,7 +176,7 @@ impl App {
     fn start(ctx: egui::Context, args: args::Args) -> Self {
         let mut app = Self::new(ctx);
         if let Some(port) = args.port.or_else(files::load_port) {
-            app.connect(&port);
+            app.connect_at_start(&port);
         }
         if let Some(Err(e)) = args.file.map(|f| app.open(Path::new(&f))) {
             app.status = e;
@@ -166,7 +184,29 @@ impl App {
         app
     }
 
+    /// Keeps trying `path` every two seconds until it opens, e.g. once tio lets go of it.
+    fn retry_connect(&mut self) {
+        let Some(retry) = &self.retry else { return };
+        if self.connection.is_some() {
+            self.retry = None;
+            return;
+        }
+        if Instant::now() < retry.next {
+            wake_after(&self.ctx, retry.next - Instant::now());
+            return;
+        }
+        let path = retry.path.clone();
+        self.connect(&path);
+        if self.connection.is_none() {
+            self.retry = Some(Retry::after(&path));
+            self.status =
+                format!("{path} is busy or missing, retrying (close tio or pick another port)");
+            wake_after(&self.ctx, RETRY_EVERY);
+        }
+    }
+
     fn connect(&mut self, path: &str) {
+        self.retry = None;
         self.connection = None;
         let ctx = self.ctx.clone();
         match Connection::open(path, move || ctx.request_repaint()) {
@@ -181,7 +221,16 @@ impl App {
         }
     }
 
+    fn connect_at_start(&mut self, path: &str) {
+        self.connect(path);
+        if self.connection.is_none() {
+            self.retry = Some(Retry::after(path));
+            wake_after(&self.ctx, RETRY_EVERY);
+        }
+    }
+
     fn disconnect(&mut self) {
+        self.retry = None;
         self.connection = None;
         self.scanning = false;
         self.status = "disconnected".into();
@@ -323,7 +372,8 @@ impl App {
             self.handle_planner(action);
         }
         ui.separator();
-        ui.small(&self.status);
+        let status = ui.small(&self.status);
+        clipboard::copy_menu(&status, "copy message", &self.status);
     }
 
     fn plot(&self, ui: &mut egui::Ui) {
@@ -359,10 +409,27 @@ impl App {
     }
 }
 
+/// A port that could not be opened at startup and is tried again until it works.
+struct Retry {
+    path: String,
+    next: Instant,
+}
+
+impl Retry {
+    fn after(path: &str) -> Self {
+        Self {
+            path: path.to_string(),
+            next: Instant::now() + RETRY_EVERY,
+        }
+    }
+}
+
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.drain_events();
         self.give_up_on_abort();
+        self.retry_connect();
+        clipboard::classic_keys(ui.ctx());
         let connected = self.connection.as_ref().map(|c| c.path.as_str());
         let action = egui::Panel::top("menu")
             .show(ui, |ui| {
@@ -372,6 +439,7 @@ impl eframe::App for App {
                     connected,
                     self.scanning,
                     self.console.open,
+                    !self.doc.scan.samples.is_empty(),
                 )
             })
             .inner;

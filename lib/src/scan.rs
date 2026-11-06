@@ -55,6 +55,14 @@ impl Scan {
     }
 }
 
+impl Scan {
+    /// The same table as [`Scan::to_csv`], tab separated, so that a spreadsheet takes
+    /// it from the clipboard as columns. No field contains a comma, so swapping is safe.
+    pub fn to_tsv(&self) -> String {
+        self.to_csv().replace(',', "\t")
+    }
+}
+
 fn lines(lines: impl Iterator<Item = String>) -> String {
     lines.map(|line| line + "\n").collect()
 }
@@ -161,6 +169,33 @@ mod tests {
         ];
         for (name, scan, want) in cases {
             assert_eq!(scan.to_csv(), want, "{name}");
+        }
+    }
+
+    #[test]
+    fn to_tsv() {
+        let three = Scan {
+            header: None,
+            samples: vec![Sample {
+                nm: 700.0,
+                reads: vec![1, 2, 6],
+            }],
+        };
+        let cases = [
+            (
+                "one read",
+                scan(),
+                "nm\tread1\tmean\n535\t4674\t4674.0\n535.1\t3475\t3475.0\n",
+            ),
+            (
+                "three reads",
+                three,
+                "nm\tread1\tread2\tread3\tmean\n700\t1\t2\t6\t3.0\n",
+            ),
+            ("empty", Scan::default(), "nm\tmean\n"),
+        ];
+        for (name, scan, want) in cases {
+            assert_eq!(scan.to_tsv(), want, "{name}");
         }
     }
 }

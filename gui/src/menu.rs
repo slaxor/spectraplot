@@ -11,6 +11,8 @@ pub enum Action {
     Connect(String),
     Disconnect,
     ToggleConsole,
+    CopyData,
+    CopyCommand,
     Help(&'static str),
     DeviceHelp,
 }
@@ -33,12 +35,14 @@ pub fn bar(
     connected: Option<&str>,
     scanning: bool,
     console_open: bool,
+    has_data: bool,
 ) -> Option<Action> {
     let mut action = None;
     egui::MenuBar::new().ui(ui, |ui| {
         ui.menu_button("File", |ui| {
             action = file_entries(ui, recent).map(Action::File)
         });
+        ui.menu_button("Edit", |ui| action = edit_entries(ui, has_data));
         ui.menu_button("Port", |ui| action = port_entries(ui, connected, scanning));
         ui.menu_button("View", |ui| {
             let console = egui::Button::selectable(console_open, "Console  F12");
@@ -48,6 +52,18 @@ pub fn bar(
         });
         ui.menu_button("Help", |ui| action = help_entries(ui));
     });
+    action
+}
+
+fn edit_entries(ui: &mut egui::Ui, has_data: bool) -> Option<Action> {
+    let mut action = None;
+    let data = egui::Button::new("Copy data");
+    if ui.add_enabled(has_data, data).clicked() {
+        action = Some(Action::CopyData);
+    }
+    if ui.button("Copy command").clicked() {
+        action = Some(Action::CopyCommand);
+    }
     action
 }
 

@@ -10,6 +10,8 @@ use spectraplot::event::{self, Event};
 const BAUD: u32 = 115_200;
 const IO_TIMEOUT: Duration = Duration::from_secs(1);
 const LINE_END: &str = "\r";
+const DEL: char = '\x7f';
+const DEVICE_LINE_CAPACITY: usize = 128;
 
 /// One received line as a terminal would show it, and what it means.
 #[derive(Debug, PartialEq)]
@@ -179,10 +181,17 @@ fn spawn_writer(mut port: Box<dyn SerialPort>, outbox: Outbox) -> Sender<String>
     tx
 }
 
-/// Writes one line with the REPL's line end; deliberately no flush, which would
-/// wait without limit for a device that does not read.
+/// What the firmware's line editor needs to start from an empty line: more DELs than
+/// its line holds. On an empty line they are silent.
+fn clear_device_line() -> String {
+    DEL.to_string().repeat(DEVICE_LINE_CAPACITY + 1)
+}
+
+/// Writes one line with the REPL's line end, after clearing whatever the device still
+/// has in its line buffer (a command is otherwise glued to stray bytes, e.g. from tio).
+/// Deliberately no flush, which would wait without limit for a device that does not read.
 fn write_line(out: &mut impl Write, line: &str) -> std::io::Result<()> {
-    out.write_all(format!("{line}{LINE_END}").as_bytes())
+    out.write_all(format!("{}{line}{LINE_END}", clear_device_line()).as_bytes())
 }
 
 #[cfg(test)]
@@ -255,7 +264,9 @@ mod tests {
     fn write_line_appends_line_end() {
         let mut out = Vec::new();
         write_line(&mut out, "abort scan").expect("write to vec");
-        assert_eq!(out, b"abort scan\r");
+        let (cleared, command) = out.split_at(DEVICE_LINE_CAPACITY + 1);
+        assert_eq!(command, b"abort scan\r");
+        assert!(cleared.iter().all(|b| *b == 0x7f));
     }
 
     fn usb(manufacturer: Option<&str>, product: Option<&str>) -> SerialPortType {

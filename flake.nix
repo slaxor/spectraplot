@@ -16,7 +16,9 @@
           "rust-src"
           "rust-analyzer"
         ];
+        targets = [ "x86_64-pc-windows-gnu" ];
       };
+      mingw = pkgs.pkgsCross.mingwW64;
     in
     {
       devShells.x86_64-linux.default = pkgs.mkShell {
@@ -24,7 +26,9 @@
           rust
           just
           cargo-nextest
+          mingw.stdenv.cc
         ];
+        CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS = "-L native=${mingw.windows.pthreads}/lib";
         LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (
           with pkgs;
           [

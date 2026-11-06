@@ -155,6 +155,19 @@ pub const SECTIONS: &[Section] = &[
             ("F12", "console"),
             ("Enter", "send the console line"),
             ("Up / Down", "console history"),
+            ("Ctrl+C / V / X", "copy, paste, cut in text fields"),
+            (
+                "Ctrl+Insert, Shift+Insert, Shift+Delete",
+                "copy, paste, cut (classic keys)",
+            ),
+            (
+                "Right click",
+                "copy the console log, status line, command line",
+            ),
+            (
+                "Edit menu",
+                "copy the scan as TSV (pastes into a spreadsheet), copy the command",
+            ),
         ])],
     },
     Section {
@@ -244,9 +257,31 @@ fn page(ui: &mut egui::Ui, section: &Section) {
     ui.vertical(|ui| page_contents(ui, section));
 }
 
+/// The page as plain text, for the clipboard.
+fn section_text(section: &Section) -> String {
+    let mut text = format!("{}\n\n", section.title);
+    for block in section.body {
+        match block {
+            Block::Text(t) | Block::Code(t) => text.push_str(t),
+            Block::Table(rows) => {
+                for (key, description) in *rows {
+                    text.push_str(&format!("{key}\t{description}\n"));
+                }
+            }
+        }
+        text.push_str("\n\n");
+    }
+    text.trim_end().to_string() + "\n"
+}
+
 fn page_contents(ui: &mut egui::Ui, section: &Section) {
     egui::ScrollArea::vertical().show(ui, |ui| {
-        ui.heading(section.title);
+        ui.horizontal(|ui| {
+            ui.heading(section.title);
+            if ui.small_button("copy page").clicked() {
+                ui.ctx().copy_text(section_text(section));
+            }
+        });
         ui.add_space(4.0);
         for (index, block) in section.body.iter().enumerate() {
             render(ui, block, index);
@@ -288,6 +323,19 @@ mod tests {
             assert!(!section.body.is_empty(), "{} is empty", section.title);
             let duplicate = SECTIONS[..index].iter().any(|s| s.title == section.title);
             assert!(!duplicate, "{} appears twice", section.title);
+        }
+    }
+
+    #[test]
+    fn section_text_has_title_and_every_block() {
+        for section in SECTIONS {
+            let text = section_text(section);
+            assert!(text.starts_with(section.title), "{}", section.title);
+            for block in section.body {
+                if let Block::Text(t) | Block::Code(t) = block {
+                    assert!(text.contains(t), "{}", section.title);
+                }
+            }
         }
     }
 

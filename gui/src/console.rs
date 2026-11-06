@@ -1,8 +1,8 @@
-use std::collections::VecDeque;
-
 use eframe::egui;
 
-const MAX_LINES: usize = 5000;
+use crate::clipboard;
+
+const MAX_LINES: usize = 2000;
 const MAX_HISTORY: usize = 50;
 
 /// The drop-down console: everything the device sent, and a line to type commands.
@@ -10,7 +10,7 @@ const MAX_HISTORY: usize = 50;
 pub struct Console {
     pub open: bool,
     focus_pending: bool,
-    lines: VecDeque<String>,
+    text: String,
     input: String,
     history: Vec<String>,
     browsing: Option<usize>,
@@ -25,10 +25,17 @@ impl Console {
 
     /// Appends a line to the log, dropping the oldest beyond the limit.
     pub fn push(&mut self, line: String) {
-        if self.lines.len() == MAX_LINES {
-            self.lines.pop_front();
+        self.text.push_str(&line);
+        self.text.push('\n');
+        let surplus = self.text.matches('\n').count().saturating_sub(MAX_LINES);
+        if surplus > 0 {
+            let cut = self
+                .text
+                .match_indices('\n')
+                .nth(surplus - 1)
+                .map_or(0, |(i, _)| i + 1);
+            self.text.drain(..cut);
         }
-        self.lines.push_back(line);
     }
 
     /// Draws log and input; returns a command when the user pressed Enter.
@@ -44,16 +51,20 @@ impl Console {
         .inner
     }
 
+    /// The log is a read-only text field, so it can be selected and copied.
     fn log(&self, ui: &mut egui::Ui) {
-        let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
-        egui::ScrollArea::vertical()
+        let mut shown: &str = &self.text;
+        let area = egui::ScrollArea::vertical()
             .auto_shrink(false)
             .stick_to_bottom(true)
-            .show_rows(ui, row_height, self.lines.len(), |ui, rows| {
-                for line in self.lines.range(rows) {
-                    ui.monospace(line);
-                }
+            .show(ui, |ui| {
+                let edit = egui::TextEdit::multiline(&mut shown)
+                    .font(egui::TextStyle::Monospace)
+                    .frame(egui::Frame::NONE)
+                    .desired_width(f32::INFINITY);
+                ui.add(edit)
             });
+        clipboard::copy_menu(&area.inner, "copy all", &self.text);
     }
 
     fn input_line(&mut self, ui: &mut egui::Ui) -> Option<String> {
@@ -121,8 +132,9 @@ mod tests {
         for i in 0..MAX_LINES + 2 {
             console.push(i.to_string());
         }
-        assert_eq!(console.lines.len(), MAX_LINES);
-        assert_eq!(console.lines.front().map(String::as_str), Some("2"));
+        assert_eq!(console.text.matches('\n').count(), MAX_LINES);
+        assert!(console.text.starts_with("2\n3\n"));
+        assert!(console.text.ends_with(&format!("{}\n", MAX_LINES + 1)));
     }
 
     #[test]

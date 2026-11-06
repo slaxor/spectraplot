@@ -52,7 +52,9 @@ impl Planner {
             self.plan.steps(),
             minutes_seconds(self.plan.integration_total())
         ));
-        ui.monospace(self.plan.to_command());
+        let command = self.plan.to_command();
+        let line = ui.monospace(&command);
+        crate::clipboard::copy_menu(&line, "copy command", &command);
         problems(ui, &self.plan.problems());
         ui.separator();
         if scanning {

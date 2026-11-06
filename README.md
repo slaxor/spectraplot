@@ -102,7 +102,16 @@ A running scan can be stopped with **abort scan**.
 F12 drops the console down from the top. It shows every line the device sends,
 cleaned of terminal escape codes. Enter sends a command, Up and Down walk
 through the last 50. **Help › Device commands** asks the firmware for its own
-command list. Commands go to the same port as the scans.
+command list. Commands go to the same port as the scans. The log is selectable
+text; right-click it for "copy all".
+
+### Clipboard
+
+Ctrl+C/V/X work in text fields, as do Ctrl+Insert, Shift+Insert and Shift+Delete.
+**Edit › Copy data** puts the scan on the clipboard tab separated, so a
+spreadsheet takes it as columns; **Edit › Copy command** copies the `SCAN` line.
+Right-click the status line or the command line to copy them; help pages have a
+"copy page" button. Middle-click paste (primary selection) is not supported by egui.
 
 ### Files
 
